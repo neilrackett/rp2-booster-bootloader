@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.4.3 (unreleased)
+
+_In development. Sections below are filled in as epics land and finalised at tag time._
+
+---
+
 ## v2.4.2 (2026-09-30) - release
 
 Firmware only. The `.wificonf` file on the microSD card can now set a static IP address, and it is applied at every boot, so it can also change the network settings of a device that is already set up. For microfirmware developers, launching the DEV APP works again with a debug probe, and new buttons restore it from a clean slate or reset only its settings.
