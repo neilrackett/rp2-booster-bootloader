@@ -4,6 +4,9 @@
 
 _In development. Sections below are filled in as epics land and finalised at tag time._
 
+### New features
+- **News in the web interface menu.** The menu at the top of the Apps, Network and Config pages now ends with **News**, to the right of **Report Issue**. It opens the [SidecarTridge news channel on Telegram](https://t.me/s/sidecartridgenews) in a new tab.
+
 ---
 
 ## v2.4.2 (2026-09-30) - release

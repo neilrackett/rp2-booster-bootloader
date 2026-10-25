@@ -344,6 +344,8 @@ In **Manager mode**, the Booster app tries to connect to your configured WiFi ne
 
 If your network supports `.local` name resolution, you can access the web interface using `http://sidecart.local`. Otherwise, use the IP address shown on the Atari ST screen: the one assigned by your DHCP server, or the static address set on the [Network view](#network-view) or in a [`.wificonf` file](#configuring-wifi-from-a-file).
 
+The menu at the top of the web interface opens the [Apps](#apps-view), [Network](#network-view) and [Config](#config-view) views. Its last three items open in a new tab: **Help** goes to the online documentation, **Report Issue** to the page for reporting a problem, and **News** to the [SidecarTridge news channel on Telegram](https://t.me/s/sidecartridgenews).
+
 If WiFi retries are exhausted, Booster falls back to an **offline Manager mode**. In that state network features are disabled, but the Atari ST terminal remains available so you can still boot already-downloaded microfirmwares manually.
 
 The Atari ST Manager screen and the shared system information area in the web UI show the current MAC address and WiFi signal strength. When connected, Booster also answers ICMP ping requests to simplify network diagnostics.
