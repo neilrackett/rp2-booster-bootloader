@@ -46,6 +46,9 @@ device's build ID) and logs stay out of git.
 - **`postmortem` and `read` halt or touch the bus.** `postmortem` stops both cores for a few seconds,
   so the ST sees a dead cartridge meanwhile; everything else reads while the RP runs.
 - **`select long --force` is a factory reset.**
+- **`flash.sh` reports "not running" while a microfirmware is the boot app.** After the reset the
+  device boots that microfirmware, whose vector table `running` does not recognise. The flash is
+  still right: `swd.py verify` and `build-id` confirm it. Return to Booster, or check those two.
 
 ## Differences from the template
 

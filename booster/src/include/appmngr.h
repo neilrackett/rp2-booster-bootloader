@@ -222,7 +222,10 @@ typedef enum {
   DOWNLOAD_LAUNCHAPP_INPROGRESS,
   DOWNLOAD_LAUNCHAPP_OK,
   DOWNLOAD_LAUNCHAPP_SDCARDNOTREADY_ERROR,
-  DOWNLOAD_LAUNCHAPP_NOTUUID_ERROR
+  DOWNLOAD_LAUNCHAPP_NOTUUID_ERROR,
+  // No config sector is free for the app, or the lookup table could not be
+  // read or written.
+  DOWNLOAD_LAUNCHAPP_NOCONFIGSECTOR_ERROR
 } download_launch_err_t;
 
 sdcard_info_t *appmngr_get_sdcard_info();

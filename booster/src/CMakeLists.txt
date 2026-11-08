@@ -175,6 +175,8 @@ target_sources(${PROJECT_NAME} PRIVATE
         fabric_httpd.c
         hw_config.c
         gconfig.c
+        jsonfield.c
+        lookupbackup.c
         lookuptable.c
         lwipopts.h
         mngr.c

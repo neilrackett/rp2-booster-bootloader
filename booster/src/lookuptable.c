@@ -126,7 +126,8 @@ int lookuptable_update(const char *uuid, uint16_t sector, uint8_t *table,
 
   uint16_t num_entries = *table_length / LOOKUP_ENTRY_SIZE;
   int indexFound = -1;
-  int indexEmpty = num_entries;
+  // A new entry goes after the last one, while the table has room for it.
+  int indexEmpty = (num_entries < LOOKUP_TABLE_MAX_ENTRIES) ? num_entries : -1;
 
   // Iterate through each entry in the table.
   for (uint16_t i = 0; i < num_entries; i++) {
@@ -167,7 +168,7 @@ int lookuptable_update(const char *uuid, uint16_t sector, uint8_t *table,
   } else {
     // No free slot available in the lookup table.
     DPRINTF("Lookup table is full; cannot append new entry.\n");
-    return -1;
+    return LOOKUPTABLE_FULL;
   }
 }
 
@@ -261,13 +262,17 @@ int lookuptable_delete(const char *uuid, uint8_t *table,
 /**
  * Finds the first empty configuration sector from the lookup table provided.
  *
- * @param table  Pointer to the lookup table data (in memory).
- * @param length Pointer to the total length (in bytes) of the lookup table.
+ * @param table       Pointer to the lookup table data (in memory).
+ * @param length      Pointer to the total length (in bytes) of the lookup
+ * table.
+ * @param num_sectors How many config sectors exist (sectors 0 to
+ * num_sectors-1).
  *
- * @return The lowest available sector number (16-bit value) if found,
- *         or 0 if no free sector is available.
+ * @return The lowest sector number no entry uses, or -1 if every one of the
+ *         num_sectors sectors is taken.
  */
-int16_t lookuptable_find_first_empty_sector(uint8_t *table, uint16_t *length) {
+int16_t lookuptable_find_first_empty_sector(uint8_t *table, uint16_t *length,
+                                            uint16_t num_sectors) {
   // Calculate the total number of entries in the provided table.
   uint16_t total_entries = *length / LOOKUP_ENTRY_SIZE;
   uint16_t valid_entries = 0;
@@ -285,8 +290,10 @@ int16_t lookuptable_find_first_empty_sector(uint8_t *table, uint16_t *length) {
     valid_entries++;
   }
 
-  // Iterate candidate sector numbers from 0 to total_entries
-  for (uint16_t candidate = 0; candidate <= total_entries; candidate++) {
+  // Only sectors that exist are candidates. Counting up to the number of table
+  // entries instead handed the 31st app sector 30, the lookup table's own
+  // flash sector, and the 32nd the global settings.
+  for (uint16_t candidate = 0; candidate < num_sectors; candidate++) {
     bool used = false;
     for (uint16_t i = 0; i < valid_entries; i++) {
       uint8_t *entry = table + (i * LOOKUP_ENTRY_SIZE);
@@ -302,6 +309,91 @@ int16_t lookuptable_find_first_empty_sector(uint8_t *table, uint16_t *length) {
     }
   }
 
-  // If all candidate sectors appear to be used (unlikely), return 0.
-  return 0;
+  DPRINTF("All %u config sectors are in use.\n", num_sectors);
+  return -1;
+}
+
+int lookuptable_sanitize(uint8_t *table, uint16_t *table_length,
+                         uint16_t num_sectors) {
+  uint16_t num_entries = *table_length / LOOKUP_ENTRY_SIZE;
+  uint16_t kept = 0;
+  int dropped = 0;
+  for (uint16_t i = 0; i < num_entries; i++) {
+    uint8_t *entry = table + (i * LOOKUP_ENTRY_SIZE);
+    if (entry[0] == 0 || !uuid_is_valid4((const char *)entry)) {
+      break;  // the table ends here
+    }
+    uint16_t sector = entry[36] | (((uint16_t)entry[37]) << 8);
+    bool shared = false;
+    for (uint16_t k = 0; k < kept; k++) {
+      const uint8_t *other = table + (k * LOOKUP_ENTRY_SIZE);
+      if ((other[36] | (((uint16_t)other[37]) << 8)) == sector) {
+        shared = true;
+        break;
+      }
+    }
+    if (sector >= num_sectors || shared) {
+      DPRINTF("Dropping lookup entry %.*s: sector %u %s\n", 36,
+              (const char *)entry, sector,
+              shared ? "already used by another app" : "does not exist");
+      dropped++;
+      continue;
+    }
+    if (kept != i) {
+      memmove(table + (kept * LOOKUP_ENTRY_SIZE), entry, LOOKUP_ENTRY_SIZE);
+    }
+    kept++;
+  }
+  // Clear what is left after the kept entries.
+  memset(table + (kept * LOOKUP_ENTRY_SIZE), 0,
+         (size_t)(num_entries - kept) * LOOKUP_ENTRY_SIZE);
+  *table_length = (uint16_t)(kept * LOOKUP_ENTRY_SIZE);
+  return dropped;
+}
+
+int lookuptable_move_to_end(const char *uuid, uint8_t *table,
+                            uint16_t table_length) {
+  uint16_t num_entries = table_length / LOOKUP_ENTRY_SIZE;
+  for (uint16_t i = 0; i < num_entries; i++) {
+    uint8_t *entry = table + (i * LOOKUP_ENTRY_SIZE);
+    if (entry[0] == 0 || !uuid_is_valid4((const char *)entry)) {
+      break;
+    }
+    if (memcmp(entry, uuid, 36) != 0) {
+      continue;
+    }
+    if (i == num_entries - 1) {
+      return 0;  // already the most recent
+    }
+    uint8_t moved[LOOKUP_ENTRY_SIZE];
+    memcpy(moved, entry, LOOKUP_ENTRY_SIZE);
+    memmove(entry, entry + LOOKUP_ENTRY_SIZE,
+            (size_t)(num_entries - 1 - i) * LOOKUP_ENTRY_SIZE);
+    memcpy(table + ((num_entries - 1) * LOOKUP_ENTRY_SIZE), moved,
+           LOOKUP_ENTRY_SIZE);
+    return 1;
+  }
+  return -3;
+}
+
+int lookuptable_least_recent(const uint8_t *table, uint16_t table_length,
+                             const char *const *pinned, size_t num_pinned) {
+  uint16_t num_entries = table_length / LOOKUP_ENTRY_SIZE;
+  for (uint16_t i = 0; i < num_entries; i++) {
+    const uint8_t *entry = table + (i * LOOKUP_ENTRY_SIZE);
+    if (entry[0] == 0 || !uuid_is_valid4((const char *)entry)) {
+      break;
+    }
+    bool is_pinned = false;
+    for (size_t k = 0; k < num_pinned; k++) {
+      if (pinned[k] != NULL && memcmp(entry, pinned[k], 36) == 0) {
+        is_pinned = true;
+        break;
+      }
+    }
+    if (!is_pinned) {
+      return i;
+    }
+  }
+  return -1;
 }

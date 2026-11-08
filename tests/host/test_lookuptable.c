@@ -9,12 +9,14 @@ int main(void) {
   uint8_t *table = newTable();
   uint16_t length = 0;
 
-  CHECK_EQ(lookuptable_find_first_empty_sector(table, &length), 0);
+  CHECK_EQ(lookuptable_find_first_empty_sector(table, &length, CONFIG_SECTORS),
+           0);
   CHECK_EQ(lookuptable_get_sector(uuidFor(1), table, &length), -3);
 
   // Three installs take sectors 0, 1 and 2.
   for (unsigned n = 1; n <= 3; n++) {
-    int16_t sector = lookuptable_find_first_empty_sector(table, &length);
+    int16_t sector =
+        lookuptable_find_first_empty_sector(table, &length, CONFIG_SECTORS);
     CHECK_EQ(sector, n - 1);
     CHECK_EQ(lookuptable_update(uuidFor(n), (uint16_t)sector, table, &length),
              0);
@@ -42,14 +44,16 @@ int main(void) {
   CHECK_EQ(table[2 * LOOKUP_ENTRY_SIZE], 0);
   CHECK_EQ(lookuptable_get_sector(uuidFor(2), table, &length), -3);
   CHECK_EQ(lookuptable_get_sector(uuidFor(3), table, &length), 2);
-  CHECK_EQ(lookuptable_find_first_empty_sector(table, &length), 1);
+  CHECK_EQ(lookuptable_find_first_empty_sector(table, &length, CONFIG_SECTORS),
+           1);
   CHECK_EQ(lookuptable_delete(uuidFor(2), table, &length), -1);
 
   // Deleting the last entry and the only entry.
   CHECK_EQ(lookuptable_delete(uuidFor(3), table, &length), 0);
   CHECK_EQ(lookuptable_delete(uuidFor(1), table, &length), 0);
   CHECK_EQ(length, 0);
-  CHECK_EQ(lookuptable_find_first_empty_sector(table, &length), 0);
+  CHECK_EQ(lookuptable_find_first_empty_sector(table, &length, CONFIG_SECTORS),
+           0);
 
   // A UUID of the wrong length or form is refused before the table is read.
   CHECK_EQ(lookuptable_get_sector("short", table, &length), -1);
@@ -63,7 +67,8 @@ int main(void) {
 
   // 30 installs fill sectors 0 to 29, one each.
   for (unsigned n = 1; n <= CONFIG_SECTORS; n++) {
-    int16_t sector = lookuptable_find_first_empty_sector(table, &length);
+    int16_t sector =
+        lookuptable_find_first_empty_sector(table, &length, CONFIG_SECTORS);
     CHECK_EQ(sector, n - 1);
     lookuptable_update(uuidFor(n), (uint16_t)sector, table, &length);
   }

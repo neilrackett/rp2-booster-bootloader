@@ -7,6 +7,16 @@ _In development. Sections below are filled in as epics land and finalised at tag
 ### New features
 - **News in the web interface menu.** The menu at the top of the Apps, Network and Config pages now ends with **News**, to the right of **Report Issue**. It opens the [SidecarTridge news channel on Telegram](https://t.me/s/sidecartridgenews) in a new tab.
 
+- **Any number of apps keep their settings.** The device has 30 settings slots, and the catalogs already list 30 apps. An app now takes a slot the first time it is launched, not when it is installed, and when all 30 are in use, launching another app moves the settings of the app launched least recently to the microSD card (`<uuid>.cfg` in the apps folder). That app gets them back the next time it is launched. Microfirmwares need no update. The DEV APP keeps its slot while the Development catalog is selected. See [Settings of each app](README.md#settings-of-each-app).
+- **Apps page:** an app whose settings are on the card says so, in small grey text under its name.
+- **Atari:** the app list shows 18 apps per page; press `N` and `P` to change page, and type any app's number to launch it.
+
+### Fixes
+- **A 31st app could overwrite the device's settings.** The 31st app was given the flash sector of the app list itself, and the 32nd the sector of the WiFi and boot settings; the first time such an app saved its settings, it overwrote them. Slots are now bounded, and a device that went past 30 apps repairs its app list at the next start.
+- **The app list survives a power cut while it is being saved.** A copy is kept on the microSD card (`.lookup` in the apps folder) and put back at the next start if the copy in flash was cut short.
+- **A launch could hang the device.** Rarely, launching an app froze Booster while it stopped the network. Fixed.
+- **A failed launch no longer retries forever,** and the Atari screen says why it failed.
+
 ### For developers
 - **Host tests.** `make -C tests/host test` checks the firmware's parsers, the apps lookup table and the time conversions on the computer, in seconds, under the address and undefined-behaviour sanitizers; it also runs on every pull request. `make -C tests/host known-bugs` lists the defects that are not fixed yet.
 - **Debug Probe tools.** `tools/dev/` builds, flashes and verifies Booster over a Raspberry Pi Debug Probe, tells which build the device runs, captures the Atari screen and the debug console, and prints both cores' backtraces from a hung device. `tools/dev/testserver.py` serves catalogs and failing downloads for testing. See [tools/dev/README.md](tools/dev/README.md).
