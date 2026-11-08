@@ -175,17 +175,23 @@ target_sources(${PROJECT_NAME} PRIVATE
         fabric_httpd.c
         hw_config.c
         gconfig.c
+        lookuptable.c
         lwipopts.h
         mngr.c
         mngr_httpd.c
         network.c
+        network_parse.c
         reset.c
         romemul.c
         sdcard.c
         select.c
         term.c
+        urlparse.c
+        uuid.c
+        vercmp.c
         version.c
         wificonf.c
+        wificonf_parse.c
         cjson/cJSON.c
         httpc/httpc.c
         md5/md5.c

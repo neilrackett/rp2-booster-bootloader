@@ -17,7 +17,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "network.h"
+#include "network_parse.h"
 
 #define WIFICONF_FILE "/.wificonf"
 #define WIFICONF_LINE_MAX 128

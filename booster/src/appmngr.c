@@ -157,108 +157,6 @@ static void appmngr_prepare_launch_runtime(void) {
 
 void appmngr_set_download_update(bool update) { download_update = update; }
 
-// Helper function to check if a 36-character string is a valid UUID4.
-// A valid UUID4 is in the canonical format
-// "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx" where x is a hexadecimal digit and y
-// is one of [8, 9, A, B] (case-insensitive).
-static int is_valid_uuid4(const char *uuid) {
-  // Check length: assume uuid is exactly 36 characters (without a null
-  // terminator). Check that the hyphens are in the correct positions.
-  for (int i = 0; i < 36; i++) {
-    if (i == 8 || i == 13 || i == 18 || i == 23) {
-      if (uuid[i] != '-') {
-        return 0;
-      }
-    } else {
-      if (!isxdigit((unsigned char)uuid[i])) {
-        return 0;
-      }
-    }
-  }
-  // Check the version: the first character of the third group (index 14) must
-  // be '4'
-  if (uuid[14] != '4') {
-    return 0;
-  }
-  // Check the variant: the first character of the fourth group (index 19)
-  // must be one of '8', '9', 'A', or 'B' (case-insensitive)
-  char variant = uuid[19];
-  if (!(variant == '8' || variant == '9' || variant == 'A' || variant == 'B' ||
-        variant == 'a' || variant == 'b')) {
-    return 0;
-  }
-  return 1;
-}
-
-// Extract the components of the URL
-static int parse_url(const char *url, url_components_t *components) {
-  if (!url || !components) {
-    return -1;  // Invalid arguments
-  }
-
-  // Initialize the components
-  memset(components, 0, sizeof(url_components_t));
-
-  // Find the protocol separator ("://")
-  const char *protocol_end = strstr(url, "://");
-  if (!protocol_end) {
-    return -1;  // Invalid URL format
-  }
-
-  // Extract the protocol
-  size_t protocol_len = protocol_end - url;
-  if (protocol_len >= sizeof(components->protocol)) {
-    return -1;  // Protocol too long
-  }
-  strncpy(components->protocol, url, protocol_len);
-  components->protocol[protocol_len] = '\0';
-
-  // Find the host start and URI start
-  const char *host_start = protocol_end + 3;  // Skip "://"
-  const char *uri_start = strchr(host_start, '/');
-  size_t host_len;
-
-  if (uri_start) {
-    // URI exists
-    host_len = uri_start - host_start;
-    if (host_len >= sizeof(components->host)) {
-      return -1;  // Host too long
-    }
-    strncpy(components->host, host_start, host_len);
-    components->host[host_len] = '\0';
-
-    // Copy the URI. Refuse rather than truncate: a silently shortened path
-    // becomes a request for the wrong resource, and on a redirect chain that
-    // means downloading something other than what was asked for. The measured
-    // worst case is a GitHub release asset at 919 characters.
-    if (strlen(uri_start) >= sizeof(components->uri)) {
-      DPRINTF("URI too long for the buffer: %u >= %u\n",
-              (unsigned)strlen(uri_start), (unsigned)sizeof(components->uri));
-      return -1;
-    }
-    strncpy(components->uri, uri_start, sizeof(components->uri) - 1);
-  } else {
-    // No URI, only host
-    strncpy(components->host, host_start, sizeof(components->host) - 1);
-    components->uri[0] = '/';
-    components->uri[1] = '\0';
-  }
-
-  // Split an explicit port off the host ("host:8080"); 0 means "use the
-  // scheme default", which httpc resolves to 80 or 443.
-  char *port_sep = strchr(components->host, ':');
-  if (port_sep != NULL) {
-    unsigned long parsed = strtoul(port_sep + 1, NULL, 10);
-    if (parsed == 0 || parsed > UINT16_MAX) {
-      return -1;  // Malformed port
-    }
-    components->port = (uint16_t)parsed;
-    *port_sep = '\0';
-  }
-
-  return 0;  // Success
-}
-
 // Write the sdcard_write_file function
 static int sdcard_write_file(const char *filename, const char *data,
                              size_t size) {
@@ -426,7 +324,7 @@ static bool appmngr_parse_installed_app(
   if (uuid && cJSON_IsString(uuid) && uuid->valuestring && name &&
       cJSON_IsString(name) && name->valuestring &&
       strcasecmp(uuid->valuestring, expected_uuid) == 0 &&
-      is_valid_uuid4(expected_uuid)) {
+      uuid_is_valid4(expected_uuid)) {
     snprintf(installed_app->uuid, sizeof(installed_app->uuid), "%s",
              expected_uuid);
     snprintf(installed_app->name, sizeof(installed_app->name), "%s",
@@ -1080,7 +978,7 @@ uint16_t appmngr_get_installed_apps(appmngr_installed_app_t *apps,
       continue;
     }
     snprintf(uuid, sizeof(uuid), "%.*s", (int)base_len, fno.fname);
-    if (!is_valid_uuid4(uuid)) {
+    if (!uuid_is_valid4(uuid)) {
       continue;
     }
 
@@ -1423,7 +1321,7 @@ void appmngr_load_apps_lookup_table(uint8_t *table, uint16_t *length) {
       break;
     }
 
-    if (!is_valid_uuid4((const char *)entry_ptr)) {
+    if (!uuid_is_valid4((const char *)entry_ptr)) {
       // Invalid UUID format: assume no further valid data.
       break;
     }
@@ -1437,299 +1335,6 @@ void appmngr_load_apps_lookup_table(uint8_t *table, uint16_t *length) {
   // Return the total number of bytes read in the lookup table via the length
   // pointer.
   *length = total_bytes_read;
-}
-
-/**
- * Searches the lookup table for an entry matching the given UUID.
- *
- * @param uuid   A pointer to the 36-character UUID string to search for.
- * @param table  A pointer to the lookup table data in RAM.
- * @param length Total number of bytes stored in the lookup table.
- *
- * @return The page number (as a 16-bit integer) if found, or -1 if not found.
- */
-static int16_t appmngr_get_page_number_for_uuid(const char *uuid,
-                                                uint8_t *table,
-                                                uint16_t length) {
-  // Determine the number of entries in the table.
-  uint16_t num_entries = length / LOOKUP_ENTRY_SIZE;
-
-  for (uint16_t i = 0; i < num_entries; i++) {
-    uint8_t *entry = table + (i * LOOKUP_ENTRY_SIZE);
-
-    // If the first byte is zero, assume no further valid entries.
-    if (entry[0] == 0) {
-      break;
-    }
-
-    if (!is_valid_uuid4((const char *)entry)) {
-      // Invalid UUID format: assume no further valid data.
-      break;
-    }
-
-    // Compare the first 36 bytes with the given UUID.
-    if (memcmp(entry, uuid, 36) == 0) {
-      // Extract the page number from the two bytes following the UUID.
-      // Assuming little-endian format.
-      uint16_t page = entry[36] | (entry[37] << 8);
-      return page;
-    }
-  }
-
-  // UUID not found in the lookup table.
-  return -1;
-}
-
-/**
- * @brief Retrieves the lookup table sector corresponding to a given UUID.
- *
- * @param uuid         The UUID string to search for. Must be exactly 36
- * characters in length.
- * @param table        Pointer to the lookup table containing the entries.
- * @param table_length Pointer to a variable holding the table's total length in
- * bytes. This could be a pointer to const if the length is not modified.
- *
- * @return The sector number if a matching UUID is found; otherwise, returns a
- * negative error code:
- *         - Returns -1 if the UUID length is invalid.
- *         - Returns -2 if the UUID format is invalid.
- *         - Returns -3 if the UUID was not found in the table.
- */
-static int appmngr_get_lookup_table_sector(const char *uuid, uint8_t *table,
-                                           uint16_t *table_length) {
-  int sector = -3;  // Default to -3 to indicate not found or error
-  // Validate that the UUID is exactly 36 characters
-  if (strlen(uuid) != 36) {
-    DPRINTF("Invalid UUID length: %u. Expected 36 characters.\n",
-            (unsigned)strlen(uuid));
-    return -1;  // Error: invalid UUID length
-  }
-
-  if (!is_valid_uuid4(uuid)) {
-    DPRINTF("Invalid UUID format: %s\n", uuid);
-    return -2;  // Error: invalid UUID format
-  }
-
-  uint16_t num_entries = *table_length / LOOKUP_ENTRY_SIZE;
-  int indexFound = -1;
-
-  // Iterate through each entry in the table.
-  for (uint16_t i = 0; i < num_entries; i++) {
-    uint8_t *entry = table + (i * LOOKUP_ENTRY_SIZE);
-    // If the entry is not empty (first byte is not 0), check if it matches the
-    // UUID.
-    if (entry[0] != 0) {
-      if (memcmp(entry, uuid, 36) == 0) {
-        indexFound = i;
-        break;
-      }
-    }
-  }
-
-  // Return the sector if found.
-  if (indexFound != -1) {
-    uint8_t *entry = table + (indexFound * LOOKUP_ENTRY_SIZE);
-    sector = entry[36] | (entry[37] << 8);
-    DPRINTF("Return entry at index %d with sector %u.\n", indexFound, sector);
-  }
-  return sector;
-}
-
-static int appmngr_update_lookup_table(const char *uuid, uint16_t sector,
-                                       uint8_t *table, uint16_t *table_length) {
-  // Validate that the UUID is exactly 36 characters
-  if (strlen(uuid) != 36) {
-    DPRINTF("Invalid UUID length: %u. Expected 36 characters.\n",
-            (unsigned)strlen(uuid));
-    return -1;
-  }
-
-  if (!is_valid_uuid4(uuid)) {
-    DPRINTF("Invalid UUID format: %s\n", uuid);
-    return -2;
-  }
-
-  uint16_t num_entries = *table_length / LOOKUP_ENTRY_SIZE;
-  int indexFound = -1;
-  int indexEmpty = num_entries;
-
-  // Iterate through each entry in the table.
-  for (uint16_t i = 0; i < num_entries; i++) {
-    uint8_t *entry = table + (i * LOOKUP_ENTRY_SIZE);
-    // If the entry is empty (first byte is 0), record the index if we haven't
-    // found an empty slot yet.
-    if (entry[0] == 0) {
-      if (indexEmpty == -1) {
-        indexEmpty = i;
-      }
-    } else {
-      // Otherwise, compare the stored UUID (first 36 bytes) with the provided
-      // UUID.
-      if (memcmp(entry, uuid, 36) == 0) {
-        indexFound = i;
-        break;
-      }
-    }
-  }
-
-  if (indexFound != -1) {
-    // Entry found: overwrite the sector value.
-    uint8_t *entry = table + (indexFound * LOOKUP_ENTRY_SIZE);
-    entry[36] = sector & 0xFF;
-    entry[37] = (sector >> 8) & 0xFF;
-    DPRINTF("Updated entry at index %d with sector %u.\n", indexFound, sector);
-    return 0;
-  } else if (indexEmpty != -1) {
-    // No matching entry found, but there is an empty slot: append new entry.
-    uint8_t *entry = table + (indexEmpty * LOOKUP_ENTRY_SIZE);
-    memcpy(entry, uuid, 36);  // Copy the UUID exactly (36 bytes)
-    entry[36] = sector & 0xFF;
-    entry[37] = (sector >> 8) & 0xFF;
-    *table_length += LOOKUP_ENTRY_SIZE;
-    DPRINTF("Appended new entry at index %d: UUID = %.*s, sector = %u.\n",
-            indexEmpty, 36, uuid, sector);
-    return 0;
-  } else {
-    // No free slot available in the lookup table.
-    DPRINTF("Lookup table is full; cannot append new entry.\n");
-    return -1;
-  }
-}
-
-/**
- * Delete an entry from the lookup table given its UUID.
- *
- * Each entry in the lookup table is 38 bytes:
- * - The first 36 bytes store the UUID (exactly as a 36-character string)
- * - The next 2 bytes store the sector (page number) in little-endian format.
- *
- * The table is stored as a contiguous block of memory. Valid entries are
- * assumed to be contiguous from the beginning of the table, and an entry is
- * considered empty if its first byte is zero.
- *
- * @param uuid         A pointer to the 36-character UUID string to delete.
- * @param table        Pointer to the lookup table data in memory.
- * @param table_length Total length (in bytes) of the lookup table.
- *
- * @return 0 on success, or -1 if the UUID is not found or if the UUID length is
- * invalid.
- */
-static int appmngr_delete_lookup_entry(const char *uuid, uint8_t *table,
-                                       uint16_t *table_length) {
-  // Validate that the UUID is exactly 36 characters.
-  if (strlen(uuid) != 36) {
-    DPRINTF("Invalid UUID length: %u. Expected 36 characters.\n",
-            (unsigned)strlen(uuid));
-    return -1;
-  }
-  if (!is_valid_uuid4(uuid)) {
-    DPRINTF("Invalid UUID format: %s\n", uuid);
-    return -2;
-  }
-
-  // Calculate the total number of entries in the table.
-  uint16_t num_entries = *table_length / LOOKUP_ENTRY_SIZE;
-  int found_index = -1;
-
-  // Determine how many valid (non-empty) entries are in the table.
-  uint16_t valid_entries = 0;
-  for (uint16_t i = 0; i < num_entries; i++) {
-    uint8_t *entry = table + i * LOOKUP_ENTRY_SIZE;
-    if (entry[0] == 0) {
-      // Assume the table ends when an empty entry is encountered.
-      break;
-    }
-    if (!is_valid_uuid4((const char *)entry)) {
-      // Invalid UUID format: assume no further valid data.
-      break;
-    }
-    valid_entries++;
-  }
-
-  // Search for the entry with the given UUID among the valid entries.
-  for (uint16_t i = 0; i < valid_entries; i++) {
-    uint8_t *entry = table + i * LOOKUP_ENTRY_SIZE;
-    if (memcmp(entry, uuid, 36) == 0) {
-      found_index = i;
-      break;
-    }
-  }
-
-  if (found_index == -1) {
-    // UUID not found in the lookup table.
-    DPRINTF("UUID not found in lookup table.\n");
-    return -1;
-  }
-
-  // If the found entry is not the last one, shift subsequent entries upward to
-  // compact the table.
-  if (found_index < valid_entries - 1) {
-    memmove(table + found_index * LOOKUP_ENTRY_SIZE,  // Destination: position
-                                                      // of the deleted entry
-            table + (found_index + 1) *
-                        LOOKUP_ENTRY_SIZE,  // Source: next entry in the table
-            (valid_entries - found_index - 1) *
-                LOOKUP_ENTRY_SIZE  // Number of bytes to move
-    );
-  }
-
-  // Clear the now-last valid entry.
-  uint8_t *last_entry = table + ((valid_entries - 1) * LOOKUP_ENTRY_SIZE);
-  memset(last_entry, 0, LOOKUP_ENTRY_SIZE);
-
-  *table_length -= LOOKUP_ENTRY_SIZE;
-
-  DPRINTF("Deleted entry for UUID: %s\n", uuid);
-  return 0;
-}
-
-/**
- * Finds the first empty configuration sector from the lookup table provided.
- *
- * @param table  Pointer to the lookup table data (in memory).
- * @param length Pointer to the total length (in bytes) of the lookup table.
- *
- * @return The lowest available sector number (16-bit value) if found,
- *         or 0 if no free sector is available.
- */
-static int16_t appmngr_find_first_empty_config_sector(uint8_t *table,
-                                                      uint16_t *length) {
-  // Calculate the total number of entries in the provided table.
-  uint16_t total_entries = *length / LOOKUP_ENTRY_SIZE;
-  uint16_t valid_entries = 0;
-
-  // Count valid entries until an empty entry is encountered.
-  for (uint16_t i = 0; i < total_entries; i++) {
-    uint8_t *entry = table + (i * LOOKUP_ENTRY_SIZE);
-    if (entry[0] == 0) {  // An entry with first byte 0 is considered empty.
-      break;
-    }
-    if (!is_valid_uuid4((const char *)entry)) {
-      // Invalid UUID format: assume no further valid data.
-      break;
-    }
-    valid_entries++;
-  }
-
-  // Iterate candidate sector numbers from 0 to total_entries
-  for (uint16_t candidate = 0; candidate <= total_entries; candidate++) {
-    bool used = false;
-    for (uint16_t i = 0; i < valid_entries; i++) {
-      uint8_t *entry = table + (i * LOOKUP_ENTRY_SIZE);
-      // Extract the sector number stored in the entry (little-endian)
-      uint16_t sector = entry[36] | (((uint16_t)entry[37]) << 8);
-      if (sector == candidate) {
-        used = true;
-        break;
-      }
-    }
-    if (!used) {
-      return candidate;
-    }
-  }
-
-  // If all candidate sectors appear to be used (unlikely), return 0.
-  return 0;
 }
 
 static int8_t appmngr_persist_app_lookup_table(const uint8_t *table,
@@ -1801,10 +1406,10 @@ void appmngr_sync_lookup_table() {
     char *dot = strrchr(base, '.');
     if (dot) *dot = '\0';
     if (strlen(base) != 36) continue;
-    if (!is_valid_uuid4(base)) continue;
+    if (!uuid_is_valid4(base)) continue;
 
     // Check if already present in table
-    int16_t page = appmngr_get_page_number_for_uuid(base, table, table_len);
+    int16_t page = lookuptable_get_page_for_uuid(base, table, table_len);
     if (page >= 0) {
       // Already present
       continue;
@@ -1837,11 +1442,11 @@ void appmngr_sync_lookup_table() {
 
     // app_info.uuid should now be set; add a new entry with next free sector
     int16_t next_sector =
-        appmngr_find_first_empty_config_sector(table, &table_len);
+        lookuptable_find_first_empty_sector(table, &table_len);
     if (next_sector < 0) next_sector = 0;  // fallback
 
-    if (appmngr_update_lookup_table(app_info.uuid, (uint16_t)next_sector, table,
-                                    &table_len) == 0) {
+    if (lookuptable_update(app_info.uuid, (uint16_t)next_sector, table,
+                           &table_len) == 0) {
       DPRINTF("sync: added %.*s -> sector %d\n", 36, app_info.uuid,
               next_sector);
       changed = true;
@@ -2148,7 +1753,7 @@ download_delete_err_t appmngr_delete_app(const char *uuid) {
   appmngr_load_apps_lookup_table(table, &table_length);
 
   // Delete and update entry in the table
-  int res = appmngr_delete_lookup_entry(uuid, table, &table_length);
+  int res = lookuptable_delete(uuid, table, &table_length);
 
   // Persist the table if ok
   if (res == -1) {
@@ -2200,7 +1805,7 @@ appmngr_config_erase_t appmngr_erase_app_config(const char *uuid) {
   }
   uint16_t table_length = 0;
   appmngr_load_apps_lookup_table(table, &table_length);
-  int sector = appmngr_get_lookup_table_sector(uuid, table, &table_length);
+  int sector = lookuptable_get_sector(uuid, table, &table_length);
   free(table);
   if (sector == LOOKUP_SECTOR_NOT_FOUND) {
     DPRINTF("Config erase: no config sector assigned to %s\n", uuid);
@@ -2237,7 +1842,7 @@ download_launch_err_t appmngr_launch_app() {
   DPRINTF("Launch app with UUID: %s\n", launch_app_uuid);
 
   // First, check that the uuid is a valid uuid
-  if (!is_valid_uuid4(launch_app_uuid)) {
+  if (!uuid_is_valid4(launch_app_uuid)) {
     DPRINTF("Invalid UUID: %s\n", launch_app_uuid);
     return DOWNLOAD_LAUNCHAPP_NOTUUID_ERROR;
   }
@@ -2415,7 +2020,7 @@ download_err_t appmngr_start_download(const char *url) {
     // download_type must stay as it was: passing a URL through the branch
     // below would silently reclassify a microfirmware download as a firmware
     // OTA, which changes the size cap and the completion handling.
-    if (parse_url(redirect_url, &components) != 0) {
+    if (urlparse_parse(redirect_url, &components) != 0) {
       DPRINTF("Error parsing redirect URL: %s\n", redirect_url);
       return DOWNLOAD_CANNOTPARSEURL_ERROR;
     }
@@ -2428,7 +2033,7 @@ download_err_t appmngr_start_download(const char *url) {
       download_error = DOWNLOAD_OK;
     }
   } else if (url == NULL || strlen(url) == 0) {
-    if (parse_url(app_info.binary, &components) != 0) {
+    if (urlparse_parse(app_info.binary, &components) != 0) {
       DPRINTF("Error parsing URL of app_info.binary: %s\n", app_info.binary);
       return DOWNLOAD_CANNOTPARSEURL_ERROR;
     }
@@ -2437,7 +2042,7 @@ download_err_t appmngr_start_download(const char *url) {
     download_status = DOWNLOAD_STATUS_STARTED;
     download_error = DOWNLOAD_OK;
   } else {
-    if (parse_url(url, &components) != 0) {
+    if (urlparse_parse(url, &components) != 0) {
       DPRINTF("Error parsing URL of url arg: %s\n", url);
       return DOWNLOAD_CANNOTPARSEURL_ERROR;
     }
@@ -2725,9 +2330,8 @@ download_err_t appmngr_finish_download_app() {
   if (!download_update) {
     // Update the table
     uint16_t new_sector =
-        appmngr_find_first_empty_config_sector(table, &table_length);
-    res = appmngr_update_lookup_table(app_info.uuid, new_sector, table,
-                                      &table_length);
+        lookuptable_find_first_empty_sector(table, &table_length);
+    res = lookuptable_update(app_info.uuid, new_sector, table, &table_length);
 
     // Persist the table if ok
     if (res == -1) {
