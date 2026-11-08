@@ -10,6 +10,7 @@
 #include "lwip/stats.h"
 #include "pico/unique_id.h"
 #include "select.h"
+#include "uf2copy.h"
 #include "upgrader_firmware.h"
 
 // Create an enum for the type of download
@@ -1760,218 +1761,75 @@ done:
   return result;
 }
 
-/*
-  Reads a UF2 file from the microSD card, ignores each block’s targetAddr,
-  and writes each block’s payload linearly into flash starting at flashAddress.
-  Before writing, it erases [flashAddress..(flashAddress + flashSize)).
+// FatFs and flash access for uf2copy_run(). Flash is out of XIP during an
+// erase or a program, so each runs with interrupts off.
+static int appmngr_uf2_read(void *ctx, uint8_t *buf, uint32_t len,
+                            uint32_t *got) {
+  UINT n = 0;
+  if (f_read((FIL *)ctx, buf, len, &n) != FR_OK) {
+    return 1;
+  }
+  *got = n;
+  return 0;
+}
 
-  We no longer write one UF2 block at a time. Instead, we accumulate multiple
-  payloads from consecutive UF2 blocks into a dynamic buffer of size
-  'userPageSize' until that buffer is full or we run out of data.
-  Then we flush that buffer to the flash.
+static int appmngr_uf2_rewind(void *ctx) {
+  return f_lseek((FIL *)ctx, 0) == FR_OK ? 0 : 1;
+}
 
-  If the leftover region in flash is smaller than the userPageSize,
-  we do partial writes, ensuring we never write beyond the allocated region.
+static void appmngr_uf2_erase(void *ctx, uint32_t offset, uint32_t len) {
+  (void)ctx;
+  uint32_t ints = save_and_disable_interrupts();
+  flash_range_erase(offset, len);
+  restore_interrupts(ints);
+}
 
-  Parameters:
-    - filename: Path to the UF2 file on SD card.
-    - flashAddress: Start address in RP2040 flash memory.
-    - flashSize: Size of the region to erase/write (must be a multiple of 4096).
-    - userPageSize: The chunk size for flash writes (must be a multiple of 256).
+static void appmngr_uf2_program(void *ctx, uint32_t offset, const uint8_t *data,
+                                uint32_t len) {
+  (void)ctx;
+  uint32_t ints = save_and_disable_interrupts();
+  flash_range_program(offset, data, len);
+  restore_interrupts(ints);
+}
 
-  Returns FRESULT error codes (FR_OK if successful, etc.).
+// Copies a microfirmware's UF2 file into the microfirmware slot, in the order
+// uf2copy.h describes: until the copy has finished, the slot boots Booster.
+// Returns DOWNLOAD_LAUNCHAPP_OK, DOWNLOAD_LAUNCHAPP_FILE_ERROR when the file
+// cannot be opened (the slot is untouched), or DOWNLOAD_LAUNCHAPP_COPY_ERROR
+// when the copy stopped partway (the slot boots Booster).
+static download_launch_err_t appmngr_copy_app_to_slot(const char *filename) {
+  _Static_assert(APP_FLASH_COPY_CHUNK_SIZE == UF2COPY_SECTOR_SIZE,
+                 "the copy works in flash sectors");
+  // Static, not malloc'd: see APP_FLASH_COPY_CHUNK_SIZE in appmngr.h.
+  static uint8_t sectorBuf[APP_FLASH_COPY_CHUNK_SIZE];
 
-  Steps:
-    1) Verify userPageSize is multiple of 256.
-    2) Open UF2 file.
-    3) Erase [flashAddress..flashAddress+flashSize).
-    4) Repeatedly read 512-byte UF2 blocks from file, parse out the payload,
-       and accumulate that payload in a dynamic buffer up to userPageSize.
-    5) Once the buffer is full (or no more data), write it to flash.
-    6) If flash region remains but we have partial leftover data < userPageSize,
-       do a final partial write.
-
-  NOTE:
-    - We do partial writes if leftover flash size is smaller than userPageSize.
-    - The user must ensure enough RAM is available to allocate userPageSize
-  bytes.
-*/
-
-static FRESULT __not_in_flash_func(storeUF2FileToFlash)(const char *filename,
-                                                        uint32_t flashAddress,
-                                                        uint32_t flashSize,
-                                                        uint32_t userPageSize) {
   FIL file;
-  FRESULT res;
-  FSIZE_t uf2FileSize;
-  UINT bytesRead;
-
-  // Check page size
-  if (userPageSize == 0 || (userPageSize % FLASH_PAGE_SIZE) != 0) {
-    DPRINTF("Error: userPageSize (%u) is not a multiple of %u.\n", userPageSize,
-            FLASH_PAGE_SIZE);
-    return FR_INVALID_PARAMETER;
+  FRESULT fres = f_open(&file, filename, FA_READ);
+  if (fres != FR_OK) {
+    DPRINTF("Error opening %s: %d\n", filename, fres);
+    return DOWNLOAD_LAUNCHAPP_FILE_ERROR;
   }
 
-  // Open file
-  res = f_open(&file, filename, FA_READ);
-  if (res != FR_OK) {
-    DPRINTF("Error opening file %s: %d\n", filename, res);
-    return res;
-  }
+  // The stub is Booster's own boot2 and vector table, from the start of its
+  // region: the same boot2 every microfirmware carries.
+  uint8_t stub[UF2COPY_STUB_SIZE];
+  const uint8_t *booster = (const uint8_t *)&__flash_binary_start;
+  uf2copy_buildStub(stub, booster, booster + UF2COPY_BOOT2_SIZE);
 
-  // Erase region
-  uint32_t offset = flashAddress - XIP_BASE;
-  if (flashSize == 0) {
-    // If user passed 0, nothing to do?
-    f_close(&file);
-    return FR_INVALID_PARAMETER;
-  }
-
-  DPRINTF("Erasing %u bytes of flash at offset 0x%X\n", flashSize, offset);
-  {
-    uint32_t ints = save_and_disable_interrupts();
-    flash_range_erase(offset, flashSize);
-    restore_interrupts(ints);
-  }
-
-  uf2FileSize = f_size(&file);
-  DPRINTF("UF2 file size: %u bytes\n", (unsigned int)uf2FileSize);
-  DPRINTF("Erased %u bytes of flash at offset 0x%X\n", (unsigned int)flashSize,
-          offset);
-
-  // Static staging buffer, deliberately not malloc'd -- see
-  // APP_FLASH_COPY_CHUNK_SIZE in appmngr.h for why (heap fragmentation at
-  // launch time made a large contiguous allocation unreliable).
-  static uint8_t accumBufStorage[APP_FLASH_COPY_CHUNK_SIZE];
-  if (userPageSize > sizeof(accumBufStorage)) {
-    DPRINTF("Chunk size %u exceeds the %u byte staging buffer\n", userPageSize,
-            (unsigned)sizeof(accumBufStorage));
-    f_close(&file);
-    return FR_INVALID_PARAMETER;
-  }
-  uint8_t *accumBuf = accumBufStorage;
-
-  // We'll keep track of how many bytes we have in accumBuf.
-  uint32_t accumUsed = 0;
-
-  // We'll read the file block by block (512 bytes each) and parse payload.
-  uint32_t currentOffset = offset;
-  bool done = false;
-
-  while (!done) {
-    // Attempt to read 512 bytes for a UF2 block.
-    uint8_t uf2block[UF2_BLOCK_SIZE];
-    res = f_read(&file, uf2block, sizeof(uf2block), &bytesRead);
-
-    if (res != FR_OK) {
-      DPRINTF("Error reading file: %d\n", res);
-      break;  // error
-    }
-    if (bytesRead == 0) {
-      // End of file.
-      done = true;
-    } else if (bytesRead < UF2_BLOCK_SIZE) {
-      DPRINTF("Warning: incomplete UF2 block (%u bytes). Ignored.\n",
-              bytesRead);
-      done = true;
-    } else {
-      // parse the block
-      const uint32_t UF2_MAGIC_START0 = 0x0A324655;
-      const uint32_t UF2_MAGIC_START1 = 0x9E5D5157;
-      uint32_t magic0 = ((uint32_t *)uf2block)[0];
-      uint32_t magic1 = ((uint32_t *)uf2block)[1];
-
-      if (magic0 != UF2_MAGIC_START0 || magic1 != UF2_MAGIC_START1) {
-        DPRINTF("Invalid UF2 magic. Skipping block.\n");
-        continue;  // skip
-      }
-
-      uint32_t payloadSize = ((uint32_t *)uf2block)[4];
-      if (payloadSize == 0 || payloadSize > 476) {
-        DPRINTF("Invalid UF2 payload size: %u. Skipping.\n", payloadSize);
-        continue;
-      }
-
-      // The payload is located at offset 32 in the block.
-      uint8_t *payload = uf2block + 32;
-
-      // Now we have 'payloadSize' bytes to accumulate in accumBuf.
-      // We might have to break it up if there's not enough space left.
-      uint32_t payloadPos = 0;
-
-      while (payloadPos < payloadSize) {
-        uint32_t leftover = payloadSize - payloadPos;
-        uint32_t spaceInBuf = userPageSize - accumUsed;
-        uint32_t toCopy = (leftover < spaceInBuf) ? leftover : spaceInBuf;
-
-        // Copy to the accumulation buffer.
-        memcpy(accumBuf + accumUsed, payload + payloadPos, toCopy);
-        accumUsed += toCopy;
-        payloadPos += toCopy;
-
-        // If accumBuf is full, flush it to flash.
-        if (accumUsed == userPageSize) {
-          // Check leftover region.
-          uint32_t leftoverRegion = (offset + flashSize) - currentOffset;
-          if (leftoverRegion == 0) {
-            // No more space in flash.
-            done = true;
-            break;
-          }
-
-          // We'll write either userPageSize or leftoverRegion if smaller.
-          uint32_t chunk =
-              (userPageSize <= leftoverRegion) ? userPageSize : leftoverRegion;
-
-          // Program the flash with 'chunk' bytes.
-          {
-            uint32_t ints = save_and_disable_interrupts();
-            flash_range_program(currentOffset, accumBuf, chunk);
-            restore_interrupts(ints);
-          }
-
-          currentOffset += chunk;
-          accumUsed = 0;  // reset for next round
-
-          // If leftoverRegion < userPageSize, we wrote partially.
-          if (chunk < userPageSize) {
-            done = true;
-            break;
-          }
-        }
-
-        if (done) break;
-      }
-    }
-
-    if (done) {
-      // either end of file or no more flash space
-      break;
-    }
-  }
-
-  // If we have leftover data in accumBuf, flush it partially.
-  if (accumUsed > 0 && !res) {
-    // leftover region check
-    uint32_t leftoverRegion = (offset + flashSize) - currentOffset;
-    if (leftoverRegion > 0) {
-      uint32_t chunk =
-          (accumUsed <= leftoverRegion) ? accumUsed : leftoverRegion;
-      // Program partial.
-      {
-        uint32_t ints = save_and_disable_interrupts();
-        flash_range_program(currentOffset, accumBuf, chunk);
-        restore_interrupts(ints);
-      }
-      currentOffset += chunk;
-    }
-  }
-
-  // accumBuf is static storage, not heap: nothing to free.
+  uf2copy_io_t io = {&file, appmngr_uf2_read, appmngr_uf2_rewind,
+                     appmngr_uf2_erase, appmngr_uf2_program};
+  uint32_t slotStart = (uint32_t)&_storage_flash_start;
+  uint32_t slotSize = (uint32_t)&__flash_binary_start - slotStart;
+  DPRINTF("Copying %s into the slot, %lu bytes at 0x%08lX\n", filename,
+          (unsigned long)slotSize, (unsigned long)slotStart);
+  uf2copy_result_t res =
+      uf2copy_run(&io, slotStart - XIP_BASE, slotSize, stub, sectorBuf);
   f_close(&file);
-
-  return FR_OK;
+  if (res != UF2COPY_OK) {
+    DPRINTF("Copy failed: %d\n", res);
+    return DOWNLOAD_LAUNCHAPP_COPY_ERROR;
+  }
+  return DOWNLOAD_LAUNCHAPP_OK;
 }
 
 int8_t appmngr_erase_app_lookup_table() {
@@ -2221,11 +2079,12 @@ download_launch_err_t appmngr_launch_app() {
   launch_restore = false;
 
   if (flashIt) {
-    DPRINTF("Copying app binary %s to flash memory\n", flash_filename);
-    int res = storeUF2FileToFlash(
-        flash_filename, (uint32_t)&_storage_flash_start,
-        (uint32_t)&__flash_binary_start - (uint32_t)&_storage_flash_start,
-        APP_FLASH_COPY_CHUNK_SIZE);
+    // A failed copy leaves the boot target as it is: the device must not boot
+    // what is in the slot as this app.
+    download_launch_err_t copy_err = appmngr_copy_app_to_slot(flash_filename);
+    if (copy_err != DOWNLOAD_LAUNCHAPP_OK) {
+      return copy_err;
+    }
   } else {
     DPRINTF("Development app launched; nothing uploaded, leaving flash alone\n");
   }

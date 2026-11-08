@@ -12,6 +12,8 @@
 
 // How long the Atari gets to see the reset command before the RP reboots.
 #define MNGR_ATARI_RESET_MS 1000
+// How long a launch error stays on the Atari screen before the restart.
+#define MNGR_LAUNCH_ERROR_MS 5000
 
 static firmware_upgrade_state_t firmware_upgrade_state = FIRMWARE_UPGRADE_IDLE;
 // True while the optional upgrade.md5 companion file is being fetched, false
@@ -547,6 +549,19 @@ int mngr_init() {
         if (err == DOWNLOAD_LAUNCHAPP_OK) {
           device_reset = true;
           reboot_time = make_timeout_time_ms(0);
+        } else if (err == DOWNLOAD_LAUNCHAPP_FILE_ERROR ||
+                   err == DOWNLOAD_LAUNCHAPP_COPY_ERROR) {
+          // The launch had already stopped the network, so Booster cannot
+          // carry on: show why, then restart into Booster, which the slot
+          // boots after a failed copy. The boot target was not changed.
+          appmngr_set_launch_status(err);
+          display_mngr_change_status(7, err == DOWNLOAD_LAUNCHAPP_FILE_ERROR
+                                            ? "Launch failed: app file missing"
+                                            : "Launch failed: copy error");
+          display_refresh();
+          sleep_ms(MNGR_LAUNCH_ERROR_MS);
+          mngr_reset_atari();
+          reset_device();
         } else {
           // Leave the in-progress state, or the loop retries the launch on
           // every pass. The status keeps the error for whoever asks.
