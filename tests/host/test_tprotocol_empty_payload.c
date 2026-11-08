@@ -1,8 +1,6 @@
 // units:
-/* A frame with no payload must report a payload size of 0. The parser only
- * stores the size when it is not zero, so the command callback sees the
- * previous frame's size. Today only the debug traces in term.c read it; a
- * command that sized its reply by it would read a stale payload. */
+/* A frame with no payload reports a payload size of 0, not the previous
+ * frame's size. */
 #include "test.h"
 #include "tprotocol.h"
 
