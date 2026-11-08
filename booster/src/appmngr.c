@@ -1677,7 +1677,7 @@ void appmngr_sync_lookup_table() {
 }
 
 // Give the app being launched its config sector and make it the most recently
-// launched entry of the lookup table (D-14 keeps launch order there). An app
+// launched entry of the lookup table, which is kept in launch order. An app
 // that has a sector keeps it and its settings. One that has none gets the
 // lowest free sector; when all are taken, the least recently launched app that
 // is not pinned gives its sector up after its settings are saved to the card.
