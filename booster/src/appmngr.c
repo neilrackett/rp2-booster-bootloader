@@ -6,7 +6,9 @@
 
 #include "devapi.h"
 #include "jsonfield.h"
+#include "lookupbackup.h"
 #include "lwip/stats.h"
+#include "pico/unique_id.h"
 #include "select.h"
 #include "upgrader_firmware.h"
 
@@ -1499,15 +1501,9 @@ void appmngr_load_apps_lookup_table(uint8_t *table, uint16_t *length) {
   *length = total_bytes_read;
 }
 
-static int8_t appmngr_persist_app_lookup_table(const uint8_t *table,
-                                               uint16_t table_length) {
-  // The table is one flash sector. Anything longer would be programmed into
-  // the next sector, the global settings.
-  if (table_length > LOOKUP_TABLE_SIZE) {
-    DPRINTF("Lookup table of %u bytes does not fit its %u-byte sector\n",
-            table_length, (unsigned)LOOKUP_TABLE_SIZE);
-    return -1;
-  }
+// Erase the lookup table's flash sector and program `table` into it.
+static void appmngr_program_lookup_flash(const uint8_t *table,
+                                         uint16_t table_length) {
   uint32_t flash_start = (uint32_t)&_global_lookup_flash_start;
   uint32_t config_flash_length = (uint32_t)&_global_config_flash_start -
                                  (uint32_t)&_global_lookup_flash_start;
@@ -1532,6 +1528,127 @@ static int8_t appmngr_persist_app_lookup_table(const uint8_t *table,
   }
   restore_interrupts(ints);
   select_flashLockoutEnd();
+}
+
+// <apps folder>/.lookup: the copy of the lookup table on the card
+// (lookupbackup.h), and .lookup.tmp while it is written.
+static void appmngr_lookup_backup_path(char *out, size_t out_size,
+                                       const char *suffix) {
+  snprintf(out, out_size, "%s/.lookup%s",
+           settings_find_entry(gconfig_getContext(), PARAM_APPS_FOLDER)->value,
+           suffix);
+}
+
+static void appmngr_device_id(uint8_t id[LOOKUPBACKUP_ID_SIZE]) {
+  pico_unique_board_id_t board_id;
+  pico_get_unique_board_id(&board_id);
+  memcpy(id, board_id.id, LOOKUPBACKUP_ID_SIZE);
+}
+
+// Save the table about to be programmed to the card, as .lookup.tmp, synced,
+// then renamed. If that fails the old copy is removed, so a stale table can
+// never be restored over a newer one at boot.
+static void appmngr_write_lookup_backup(const uint8_t *table,
+                                        uint16_t table_length) {
+  char tmp_path[256];
+  char path[256];
+  appmngr_lookup_backup_path(tmp_path, sizeof(tmp_path), ".tmp");
+  appmngr_lookup_backup_path(path, sizeof(path), "");
+  size_t size = LOOKUPBACKUP_HEADER_SIZE + (size_t)table_length;
+  uint8_t *data = malloc(size);
+  FRESULT res = FR_NOT_ENOUGH_CORE;
+  appmngr_fs_lock();
+  if (data != NULL) {
+    uint8_t id[LOOKUPBACKUP_ID_SIZE];
+    appmngr_device_id(id);
+    lookupbackup_encode(data, table, table_length, id);
+    FIL file;
+    UINT written = 0;
+    res = f_open(&file, tmp_path, FA_WRITE | FA_CREATE_ALWAYS);
+    if (res == FR_OK) {
+      res = f_write(&file, data, size, &written);
+      if (res == FR_OK) {
+        res = f_sync(&file);
+      }
+      FRESULT closed = f_close(&file);
+      if (res == FR_OK) {
+        res = closed;
+      }
+      if (res == FR_OK && written != size) {
+        res = FR_DISK_ERR;
+      }
+    }
+    if (res == FR_OK) {
+      f_unlink(path);
+      res = f_rename(tmp_path, path);
+    }
+  }
+  if (res != FR_OK) {
+    f_unlink(tmp_path);
+    f_unlink(path);
+    DPRINTF("Lookup backup not written (%d); old copy removed\n", res);
+  }
+  appmngr_fs_unlock();
+  free(data);
+}
+
+// At boot: a valid copy on the card that differs from the table in flash
+// means a rewrite of the flash sector was cut short (or the card copy is the
+// newer one, written just before the cut): program it back.
+static bool appmngr_restore_lookup_backup(uint8_t *table,
+                                          uint16_t *table_length) {
+  char path[256];
+  appmngr_lookup_backup_path(path, sizeof(path), "");
+  size_t max = LOOKUPBACKUP_HEADER_SIZE + LOOKUP_TABLE_SIZE;
+  uint8_t *data = malloc(max);
+  if (data == NULL) {
+    return false;
+  }
+  bool restored = false;
+  appmngr_fs_lock();
+  FIL file;
+  UINT read = 0;
+  FRESULT res = f_open(&file, path, FA_READ);
+  if (res == FR_OK) {
+    res = f_read(&file, data, max, &read);
+    f_close(&file);
+  }
+  appmngr_fs_unlock();
+  if (res == FR_OK) {
+    uint8_t id[LOOKUPBACKUP_ID_SIZE];
+    appmngr_device_id(id);
+    int length = lookupbackup_validate(data, read, id, LOOKUP_TABLE_SIZE);
+    const uint8_t *copy = data + LOOKUPBACKUP_HEADER_SIZE;
+    if (length >= 0 &&
+        (length != *table_length || memcmp(copy, table, (size_t)length) != 0)) {
+      DPRINTF(
+          "Lookup table in flash (%u bytes) differs from the copy on the "
+          "card (%d bytes): restoring the copy\n",
+          *table_length, length);
+      memset(table, 0, LOOKUP_TABLE_SIZE);
+      memcpy(table, copy, (size_t)length);
+      *table_length = (uint16_t)length;
+      appmngr_program_lookup_flash(table, *table_length);
+      restored = true;
+    }
+  }
+  free(data);
+  return restored;
+}
+
+static int8_t appmngr_persist_app_lookup_table(const uint8_t *table,
+                                               uint16_t table_length) {
+  // The table is one flash sector. Anything longer would be programmed into
+  // the next sector, the global settings.
+  if (table_length > LOOKUP_TABLE_SIZE) {
+    DPRINTF("Lookup table of %u bytes does not fit its %u-byte sector\n",
+            table_length, (unsigned)LOOKUP_TABLE_SIZE);
+    return -1;
+  }
+  // The card copy first: the flash rewrite below is erase then program, and
+  // a power cut in between would otherwise lose every app's settings slot.
+  appmngr_write_lookup_backup(table, table_length);
+  appmngr_program_lookup_flash(table, table_length);
   return 0;
 }
 
@@ -1546,6 +1663,7 @@ void appmngr_sync_lookup_table() {
   memset(table, 0, sizeof(table));
   uint16_t table_len = 0;
   appmngr_load_apps_lookup_table(table, &table_len);
+  appmngr_restore_lookup_backup(table, &table_len);
   // Firmware before v2.5.0 handed out sectors past the last config sector
   // once more than 30 apps were installed. Drop those entries, and any that
   // share a sector, so their apps get a sector of their own at their next

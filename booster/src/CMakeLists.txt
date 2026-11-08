@@ -176,6 +176,7 @@ target_sources(${PROJECT_NAME} PRIVATE
         hw_config.c
         gconfig.c
         jsonfield.c
+        lookupbackup.c
         lookuptable.c
         lwipopts.h
         mngr.c

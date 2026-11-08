@@ -397,7 +397,7 @@ To return to the Booster app, the user needs to use the command menu on the micr
 
 Each app keeps its settings in one of 30 slots in the device's flash memory. An app gets a slot the first time it is launched, not when it is installed, so apps you install but never run do not use one. When all 30 slots are in use, launching another app moves the settings of the app you launched least recently to the microSD card, as `<uuid>.cfg` in the apps folder, and that app gets them back the next time you launch it. So you can install and use any number of apps, and each keeps its settings.
 
-On the Apps page, an app whose settings are on the card says so under its name. The `.cfg` files travel with the card: another device that launches the app restores those settings. Deleting an app removes its `.cfg` too, as do **Restore config only** and **Restore and launch** on the DEV APP card. While the **Development** catalog is selected, the DEV APP keeps its slot and its settings are never moved to the card.
+On the Apps page, an app whose settings are on the card says so under its name. The `.cfg` files travel with the card: another device that launches the app restores those settings. The apps folder also holds `.lookup`, a copy of the device's list of slots, which the device uses to repair that list if the power is cut while it is being saved; a copy made by another device is ignored. Deleting an app removes its `.cfg` too, as do **Restore config only** and **Restore and launch** on the DEV APP card. While the **Development** catalog is selected, the DEV APP keeps its slot and its settings are never moved to the card.
 
 #### DEV APP: tools for microfirmware developers
 
