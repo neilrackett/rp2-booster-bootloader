@@ -109,6 +109,16 @@ void select_coreWaitPush(reset_callback_t reset, reset_callback_t resetLong) {
 
 void select_coreWaitPushDisable() {
   DPRINTF("Disabling core 1\n");
+  // Park core 1 before resetting it. It spends its time in sleep_ms(), which
+  // briefly takes the alarm pool's hardware spin lock; a reset that lands
+  // there leaves the lock taken for good, and core 0 then hangs at its next
+  // timer operation (seen in network_deInit() during a launch). The lockout
+  // handler only runs once core 1 has released its spin locks (they are held
+  // with interrupts off), so once the lockout is acknowledged core 1 holds
+  // none and the reset is safe.
+  if (s_core1_watcher_active) {
+    multicore_lockout_start_blocking();
+  }
   s_core1_watcher_active = false;
   multicore_reset_core1();
 }
