@@ -569,11 +569,18 @@ ul.device-tags li {
   margin-left: 0.4rem;
 }
 
-/* An installed app whose settings were moved to the card to free a slot. */
-.settings-on-card {
-  font-size: 0.8rem;
-  color: #777;
-  margin: 0.2rem 0;
+/* An installed app whose settings were moved to the card to free a slot.
+   Information only: small and grey, so it never reads as a warning.
+   Needs .app-details in the selector to win over .app-details p. */
+.app-details .settings-on-card {
+  font-size: 0.75rem;
+  color: #888;
+  margin: 0 0 0.6rem 0;
+}
+
+.app-details .settings-on-card i {
+  font-size: 0.7rem;
+  margin-right: 0.25rem;
 }
 
 .app-creator {

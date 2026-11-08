@@ -957,7 +957,11 @@
               <p class="app-creator">by <span x-text="creatorName(app)"></span></p>
             </template>
             <template x-if="app.installed && app.settingsOnCard">
-              <p class="settings-on-card">Settings saved on the microSD card until its next launch</p>
+              <p class="settings-on-card"
+                 title="Information only: the app gets these settings back the next time you launch it">
+                <i class="fas fa-info-circle" aria-hidden="true"></i>
+                Settings kept on the microSD card
+              </p>
             </template>
             <!-- Version selector: only when more than one version is published -->
             <template x-if="app.allVersions && app.allVersions.length > 1">
