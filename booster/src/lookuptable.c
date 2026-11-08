@@ -350,3 +350,28 @@ int lookuptable_sanitize(uint8_t *table, uint16_t *table_length,
   *table_length = (uint16_t)(kept * LOOKUP_ENTRY_SIZE);
   return dropped;
 }
+
+int lookuptable_move_to_end(const char *uuid, uint8_t *table,
+                            uint16_t table_length) {
+  uint16_t num_entries = table_length / LOOKUP_ENTRY_SIZE;
+  for (uint16_t i = 0; i < num_entries; i++) {
+    uint8_t *entry = table + (i * LOOKUP_ENTRY_SIZE);
+    if (entry[0] == 0 || !uuid_is_valid4((const char *)entry)) {
+      break;
+    }
+    if (memcmp(entry, uuid, 36) != 0) {
+      continue;
+    }
+    if (i == num_entries - 1) {
+      return 0;  // already the most recent
+    }
+    uint8_t moved[LOOKUP_ENTRY_SIZE];
+    memcpy(moved, entry, LOOKUP_ENTRY_SIZE);
+    memmove(entry, entry + LOOKUP_ENTRY_SIZE,
+            (size_t)(num_entries - 1 - i) * LOOKUP_ENTRY_SIZE);
+    memcpy(table + ((num_entries - 1) * LOOKUP_ENTRY_SIZE), moved,
+           LOOKUP_ENTRY_SIZE);
+    return 1;
+  }
+  return -3;
+}

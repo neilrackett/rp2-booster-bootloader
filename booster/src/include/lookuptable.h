@@ -80,4 +80,16 @@ int16_t lookuptable_find_first_empty_sector(uint8_t *table, uint16_t *length,
 int lookuptable_sanitize(uint8_t *table, uint16_t *table_length,
                          uint16_t num_sectors);
 
+/**
+ * @brief Moves uuid's entry to the end of the table, keeping the others in
+ * order. The table is kept in launch order: the first entry is the least
+ * recently launched app, the last the most recent. Microfirmwares find their
+ * entry by UUID, so the order means nothing to them.
+ *
+ * @return 1 if the entry moved, 0 if it was already the last, -3 if the table
+ * has no entry for uuid.
+ */
+int lookuptable_move_to_end(const char *uuid, uint8_t *table,
+                            uint16_t table_length);
+
 #endif  // LOOKUPTABLE_H

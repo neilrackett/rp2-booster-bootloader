@@ -1235,8 +1235,6 @@ const char *appmngr_download_error_to_str(download_err_t err) {
       return "HTTP error";
     case DOWNLOAD_MD5UNAVAILABLE_ERROR:
       return "Firmware checksum (upgrade.md5) missing or unreadable";
-    case DOWNLOAD_NOCONFIGSECTOR_ERROR:
-      return "All settings slots are in use: delete an app to install another";
     default:
       return "Unknown error";
   }
@@ -1383,109 +1381,70 @@ static int8_t appmngr_persist_app_lookup_table(const uint8_t *table,
 }
 
 // -----------------------------------------------------------------------------
-// Sync lookup table with JSON files on SD card
+// Repair the lookup table at boot
 // -----------------------------------------------------------------------------
+// The table is no longer filled from the .json files on the card: an app gets
+// a config sector the first time it is launched (appmngr_assign_launch_sector).
+// What is left at boot is the repair of a table written by older firmware.
 void appmngr_sync_lookup_table() {
-  // 1) Load current lookup table into RAM buffer
-  uint8_t table[4096];  // Enough for ~107 entries (4096/38)
+  uint8_t table[LOOKUP_TABLE_SIZE];
   memset(table, 0, sizeof(table));
   uint16_t table_len = 0;
   appmngr_load_apps_lookup_table(table, &table_len);
   // Firmware before v2.5.0 handed out sectors past the last config sector
   // once more than 30 apps were installed. Drop those entries, and any that
-  // share a sector, so their apps get a sector of their own again.
-  bool changed = lookuptable_sanitize(table, &table_len,
-                                      appmngr_config_sector_count()) > 0;
-
-  // 2) Open apps folder from settings
-  char apps_folder[256] = {0};
-  snprintf(apps_folder, sizeof(apps_folder), "%s",
-           settings_find_entry(gconfig_getContext(), PARAM_APPS_FOLDER)->value);
-
-  DIR dir;
-  FRESULT res = f_opendir(&dir, apps_folder);
-  if (res != FR_OK) {
-    DPRINTF("sync: cannot open apps folder %s (err=%d)\n", apps_folder, res);
-    return;
-  }
-
-  FILINFO fno;
-  for (;;) {
-    res = f_readdir(&dir, &fno);
-    if (res != FR_OK || fno.fname[0] == '\0') break;  // end
-
-    // Skip the catalog file and non-.json files
-    if (strcmp(fno.fname, "apps.json") == 0) continue;
-    char *ext = strrchr(fno.fname, '.');
-    if (!ext || strcasecmp(ext, ".json") != 0) continue;
-
-    // Base name must be 36-char UUID
-    char base[64];
-    strncpy(base, fno.fname, sizeof(base));
-    base[sizeof(base) - 1] = '\0';
-    char *dot = strrchr(base, '.');
-    if (dot) *dot = '\0';
-    if (strlen(base) != 36) continue;
-    if (!uuid_is_valid4(base)) continue;
-
-    // Check if already present in table
-    int16_t page = lookuptable_get_page_for_uuid(base, table, table_len);
-    if (page >= 0) {
-      // Already present
-      continue;
-    }
-
-    // Parse the JSON to populate app_info using existing code
-    char path[256];
-    snprintf(path, sizeof(path), "%s/%s", apps_folder, fno.fname);
-
-    FIL fil;
-    if (f_open(&fil, path, FA_READ) != FR_OK) {
-      DPRINTF("sync: cannot open %s\n", path);
-      continue;
-    }
-    // Read file content into buffer
-    char json_buf[MAXIMUM_APP_INFO_SIZE];
-    UINT br = 0;
-    FRESULT rr = f_read(&fil, json_buf, sizeof(json_buf) - 1, &br);
-    f_close(&fil);
-    if (rr != FR_OK) {
-      DPRINTF("sync: cannot read %s (err=%d)\n", path, rr);
-      continue;
-    }
-    json_buf[br] = '\0';
-
-    if (set_app_info(json_buf) != DOWNLOAD_OK) {
-      DPRINTF("sync: parse failed for %s\n", path);
-      continue;
-    }
-
-    // app_info.uuid should now be set; add a new entry with next free sector
-    int16_t next_sector = lookuptable_find_first_empty_sector(
-        table, &table_len, appmngr_config_sector_count());
-    if (next_sector < 0) {
-      DPRINTF("sync: no free config sector for %.*s; left without one\n", 36,
-              app_info.uuid);
-      continue;
-    }
-
-    if (lookuptable_update(app_info.uuid, (uint16_t)next_sector, table,
-                           &table_len) == 0) {
-      DPRINTF("sync: added %.*s -> sector %d\n", 36, app_info.uuid,
-              next_sector);
-      changed = true;
-    } else {
-      DPRINTF("sync: failed to add %.*s\n", 36, app_info.uuid);
-    }
-  }
-  f_closedir(&dir);
-
-  // 3) Persist any updates
-  if (changed) {
+  // share a sector, so their apps get a sector of their own at their next
+  // launch.
+  if (lookuptable_sanitize(table, &table_len, appmngr_config_sector_count()) >
+      0) {
     appmngr_persist_app_lookup_table(table, table_len);
   } else {
     DPRINTF("sync: no changes, nothing to persist\n");
   }
+}
+
+// Give the app being launched its config sector and make it the most recently
+// launched entry of the lookup table (D-14 keeps launch order there). An app
+// that has a sector keeps it and its settings; one that has none gets the
+// lowest free sector, erased, so it starts from its defaults.
+static download_launch_err_t appmngr_assign_launch_sector(const char *uuid) {
+  uint8_t *table = malloc(LOOKUP_TABLE_SIZE);
+  if (table == NULL) {
+    DPRINTF("Launch: no memory to read the lookup table\n");
+    return DOWNLOAD_LAUNCHAPP_NOCONFIGSECTOR_ERROR;
+  }
+  memset(table, 0, LOOKUP_TABLE_SIZE);
+  uint16_t table_length = 0;
+  appmngr_load_apps_lookup_table(table, &table_length);
+  uint16_t num_sectors = appmngr_config_sector_count();
+
+  int moved = lookuptable_move_to_end(uuid, table, table_length);
+  if (moved >= 0) {
+    if (moved > 0 && appmngr_persist_app_lookup_table(table, table_length)) {
+      DPRINTF("Launch: could not save the launch order\n");
+    }
+    DPRINTF("Launch: %s keeps sector %d\n", uuid,
+            lookuptable_get_sector(uuid, table, &table_length));
+    free(table);
+    return DOWNLOAD_LAUNCHAPP_OK;
+  }
+
+  int16_t sector =
+      lookuptable_find_first_empty_sector(table, &table_length, num_sectors);
+  if (sector < 0 ||
+      lookuptable_update(uuid, (uint16_t)sector, table, &table_length) != 0 ||
+      appmngr_persist_app_lookup_table(table, table_length) != 0) {
+    DPRINTF("Launch: no config sector for %s\n", uuid);
+    free(table);
+    return DOWNLOAD_LAUNCHAPP_NOCONFIGSECTOR_ERROR;
+  }
+  free(table);
+  if (appmngr_delete_config_sector((uint8_t)sector) != 0) {
+    DPRINTF("Launch: could not erase sector %d\n", sector);
+    return DOWNLOAD_LAUNCHAPP_NOCONFIGSECTOR_ERROR;
+  }
+  DPRINTF("Launch: %s gets sector %d\n", uuid, sector);
+  return DOWNLOAD_LAUNCHAPP_OK;
 }
 
 /*
@@ -1882,6 +1841,14 @@ download_launch_err_t appmngr_launch_app() {
   if (!sdcard_info.ready) {
     DPRINTF("SD card not ready\n");
     return DOWNLOAD_LAUNCHAPP_SDCARDNOTREADY_ERROR;
+  }
+
+  // Settings first: a launch that cannot give the app a config sector stops
+  // here, with nothing flashed and the network still up.
+  download_launch_err_t sector_err =
+      appmngr_assign_launch_sector(launch_app_uuid);
+  if (sector_err != DOWNLOAD_LAUNCHAPP_OK) {
+    return sector_err;
   }
 
   DPRINTF("Preparing runtime for app launch\n");
@@ -2348,53 +2315,34 @@ download_err_t appmngr_finish_download_app() {
     download_phase = APPMNGR_PHASE_INSTALL;
   }
 
-  // We have to add this new downloaded file to the app lookup table
+  // An install no longer takes a config sector: an app gets one the first
+  // time it is launched (appmngr_assign_launch_sector()), so apps that sit on
+  // the card unlaunched do not use any of the 30. An update keeps the app's
+  // settings. A fresh install of an app that still has a sector, from an
+  // earlier install whose files went missing, starts from clean settings, as
+  // a fresh install always did.
+  if (download_update) {
+    DPRINTF("Download is an update, not deleting the config sector.\n");
+    return DOWNLOAD_OK;
+  }
   uint8_t *table = malloc(FLASH_SECTOR_SIZE);
   if (table == NULL) {
     return DOWNLOAD_CANNOTCREATE_CONFIG;
   }
   uint16_t table_length = 0;
-  // Read the table from flash memory
   appmngr_load_apps_lookup_table(table, &table_length);
-
-  // If the download is an update, don't delete the config sector
-  if (!download_update) {
-    // Update the table
-    int16_t new_sector = lookuptable_find_first_empty_sector(
-        table, &table_length, appmngr_config_sector_count());
-    if (new_sector < 0) {
-      free(table);
-      return DOWNLOAD_NOCONFIGSECTOR_ERROR;
-    }
-    res = lookuptable_update(app_info.uuid, (uint16_t)new_sector, table,
-                             &table_length);
-    if (res != 0) {
-      DPRINTF("Cannot add %.*s to the app lookup table: %d\n", 36,
-              app_info.uuid, res);
-      free(table);
-      return DOWNLOAD_NOCONFIGSECTOR_ERROR;
-    }
-    res = appmngr_persist_app_lookup_table(table, table_length);
-    if (res == -1) {
-      DPRINTF("There was something wrong persisting the app lookup table.\n");
-    } else {
-      DPRINTF("App lookup table pesisted!\n");
-    }
-    free(table);
-
-    // Now delete the config sector of the app
-    res = appmngr_delete_config_sector((uint8_t)new_sector);
+  int sector = lookuptable_get_sector(app_info.uuid, table, &table_length);
+  free(table);
+  if (sector >= 0 && sector < appmngr_config_sector_count()) {
+    res = appmngr_delete_config_sector((uint8_t)sector);
     if (res != 0) {
       DPRINTF("Error deleting config sector: %i\n", res);
       return DOWNLOAD_CANNOTDELETECONFIGSECTOR_ERROR;
     }
-    DPRINTF("Config sector %d deleted\n", new_sector);
-    return DOWNLOAD_OK;
-  } else {
-    DPRINTF("Download is an update, not deleting the config sector.\n");
-    free(table);
-    return DOWNLOAD_OK;
+    DPRINTF("Fresh install: config sector %d of %.*s erased\n", sector, 36,
+            app_info.uuid);
   }
+  return DOWNLOAD_OK;
 }
 
 download_err_t appmngr_confirm_download_app() {

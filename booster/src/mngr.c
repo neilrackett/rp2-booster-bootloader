@@ -526,6 +526,15 @@ int mngr_init() {
         if (err == DOWNLOAD_LAUNCHAPP_OK) {
           device_reset = true;
           reboot_time = make_timeout_time_ms(0);
+        } else {
+          // Leave the in-progress state, or the loop retries the launch on
+          // every pass. The status keeps the error for whoever asks.
+          appmngr_set_launch_status(err);
+          display_mngr_change_status(
+              7, err == DOWNLOAD_LAUNCHAPP_NOCONFIGSECTOR_ERROR
+                     ? "Cannot launch: no settings slot"
+                     : "Cannot launch the app");
+          display_refresh();
         }
       }
     } else if (appmngr_get_launch_status() == DOWNLOAD_LAUNCHAPP_SCHEDULED) {
