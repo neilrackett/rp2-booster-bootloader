@@ -218,7 +218,8 @@ int main(void) {
 
   // No payload at all.
   memset(f, 0, sizeof(*f));
-  CHECK_EQ(run(f, NULL, 0), UF2COPY_ERR_EMPTY);
+  static const uint8_t noFile[1];
+  CHECK_EQ(run(f, noFile, 0), UF2COPY_ERR_EMPTY);
   CHECK(isStub(f->flash));
 
   // Larger than the slot.
