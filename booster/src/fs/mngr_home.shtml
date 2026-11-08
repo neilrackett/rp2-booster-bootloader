@@ -219,10 +219,14 @@
             if (localApp) {
               remoteApp.installed = true;
               remoteApp.installedVersion = localApp.version;
+              // The device adds "settings":"card" when the app's settings were
+              // moved to the microSD card to free a slot for another app.
+              remoteApp.settingsOnCard = localApp.settings === "card";
               remoteApp.update = this.compareSemver(remoteApp.version, localApp.version) > 0;
             } else {
               remoteApp.installed = false;
               remoteApp.installedVersion = null;
+              remoteApp.settingsOnCard = false;
               remoteApp.update = false;
             }
           });
@@ -951,6 +955,9 @@
             <!-- Creator: hidden entirely when the catalog carries none -->
             <template x-if="creatorName(app)">
               <p class="app-creator">by <span x-text="creatorName(app)"></span></p>
+            </template>
+            <template x-if="app.installed && app.settingsOnCard">
+              <p class="settings-on-card">Settings saved on the microSD card until its next launch</p>
             </template>
             <!-- Version selector: only when more than one version is published -->
             <template x-if="app.allVersions && app.allVersions.length > 1">

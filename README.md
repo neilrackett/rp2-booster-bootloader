@@ -383,7 +383,7 @@ At the right hand side of each app, you can see the following buttons:
 - **Launch**: Launch the app. This will install the app in the flash memory of the device and after reboot it will be launched automatically. If you want to launch an app that is already installed, you can use the **Launch** button at any time.
 - **Restore and launch** and **Restore config only**: Shown only on the DEV APP card. See [DEV APP: tools for microfirmware developers](#dev-app-tools-for-microfirmware-developers).
 
-On Atari ST systems, Manager mode also supports terminal-driven manual boot: press `ESC` to enter the apps workflow, or press any `SHIFT` key to continue booting from GEMDOS.
+On Atari ST systems, Manager mode also supports terminal-driven manual boot: press `ESC` to enter the apps workflow, or press any `SHIFT` key to continue booting from GEMDOS. The apps workflow lists the downloaded apps 18 to a page: press `N` and `P` for the next and previous page, and type an app's number to launch it from any page.
 
 ![Booster Manager Apps View 3](/docs/BOOSTER-MANAGER-APPS-3.png)
 
@@ -397,7 +397,7 @@ To return to the Booster app, the user needs to use the command menu on the micr
 
 Each app keeps its settings in one of 30 slots in the device's flash memory. An app gets a slot the first time it is launched, not when it is installed, so apps you install but never run do not use one. When all 30 slots are in use, launching another app moves the settings of the app you launched least recently to the microSD card, as `<uuid>.cfg` in the apps folder, and that app gets them back the next time you launch it. So you can install and use any number of apps, and each keeps its settings.
 
-The `.cfg` files travel with the card: another device that launches the app restores those settings. Deleting an app removes its `.cfg` too, as do **Restore config only** and **Restore and launch** on the DEV APP card. While the **Development** catalog is selected, the DEV APP keeps its slot and its settings are never moved to the card.
+On the Apps page, an app whose settings are on the card says so under its name. The `.cfg` files travel with the card: another device that launches the app restores those settings. Deleting an app removes its `.cfg` too, as do **Restore config only** and **Restore and launch** on the DEV APP card. While the **Development** catalog is selected, the DEV APP keeps its slot and its settings are never moved to the card.
 
 #### DEV APP: tools for microfirmware developers
 

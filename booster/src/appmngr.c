@@ -5,8 +5,8 @@
 #include <strings.h>
 
 #include "devapi.h"
+#include "jsonfield.h"
 #include "lwip/stats.h"
-
 #include "select.h"
 #include "upgrader_firmware.h"
 
@@ -804,6 +804,25 @@ static void appmngr_cleanup_tmp_download_file(void) {
   appmngr_fs_unlock();
 }
 
+// An app whose settings were moved to the card (it has a <uuid>.cfg and no
+// config sector) gets "settings":"card" added to its JSON, so the Apps page
+// can say where they are. The lookup table is read in place in flash.
+static void appmngr_note_settings_on_card(char *json, size_t max_len,
+                                          const char *uuid) {
+  if (lookuptable_get_page_for_uuid(uuid,
+                                    (uint8_t *)&_global_lookup_flash_start,
+                                    LOOKUP_TABLE_SIZE) >= 0) {
+    return;
+  }
+  char cfg_path[256];
+  snprintf(cfg_path, sizeof(cfg_path), "%s/%.36s.cfg", s_folder, uuid);
+  FILINFO info = {0};
+  if (f_stat(cfg_path, &info) != FR_OK) {
+    return;
+  }
+  jsonfield_append_string(json, max_len, "settings", "card");
+}
+
 static bool find_next_json_file(char *json, size_t max_len) {
   // We'll read directory entries until we find a valid .json file
   // or until we exhaust all entries
@@ -867,6 +886,7 @@ static bool find_next_json_file(char *json, size_t max_len) {
 
     // Null-terminate
     json[bytes_read] = '\0';
+    appmngr_note_settings_on_card(json, max_len, file_base);
 
     DPRINTF("JSON file contents: %s\n", json);
 

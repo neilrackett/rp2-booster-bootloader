@@ -569,6 +569,13 @@ ul.device-tags li {
   margin-left: 0.4rem;
 }
 
+/* An installed app whose settings were moved to the card to free a slot. */
+.settings-on-card {
+  font-size: 0.8rem;
+  color: #777;
+  margin: 0.2rem 0;
+}
+
 .app-creator {
   font-size: 0.85rem;
   color: #777;

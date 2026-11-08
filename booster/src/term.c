@@ -19,6 +19,9 @@
 #define TERM_MENU_INSTRUCTIONS "Type app number and press Enter\n"
 #define TERM_MENU_RETURN_OPTION "0. Return to connection menu\n"
 #define TERM_MENU_PROMPT "App #: "
+// Apps listed per page: the 25-row screen also holds the three header lines,
+// the page line, the prompt and one status line.
+#define TERM_APPS_PER_PAGE 18
 
 static TransmissionProtocol last_protocol;
 static bool last_protocol_valid = false;
@@ -30,6 +33,12 @@ static uint32_t memory_random_token_seed_address = 0;
 static appmngr_installed_app_t installed_apps[APPMNGR_MAX_INSTALLED_APPS];
 static uint16_t installed_app_count = 0;
 static bool installed_apps_ready = false;
+static uint16_t term_page = 0;
+
+static uint16_t term_page_count(void) {
+  return (uint16_t)((installed_app_count + TERM_APPS_PER_PAGE - 1) /
+                    TERM_APPS_PER_PAGE);
+}
 
 static char screen[TERM_SCREEN_SIZE];
 static uint8_t cursor_x = 0;
@@ -207,13 +216,28 @@ static void term_print_menu(void) {
   } else if (installed_app_count == 0) {
     term_print_string("No downloaded apps found\n");
   } else {
-    for (uint16_t i = 0; i < installed_app_count; i++) {
+    // One page at a time, numbered across pages, so an app keeps its number
+    // whichever page shows it.
+    uint16_t pages = term_page_count();
+    if (term_page >= pages) {
+      term_page = (uint16_t)(pages - 1);
+    }
+    uint16_t first = (uint16_t)(term_page * TERM_APPS_PER_PAGE);
+    uint16_t last = (uint16_t)(first + TERM_APPS_PER_PAGE);
+    if (last > installed_app_count) {
+      last = installed_app_count;
+    }
+    for (uint16_t i = first; i < last; i++) {
       if (installed_apps[i].version[0] != '\0') {
         term_printf("%u. %s (%s)\n", (unsigned)(i + 1), installed_apps[i].name,
                     installed_apps[i].version);
       } else {
         term_printf("%u. %s\n", (unsigned)(i + 1), installed_apps[i].name);
       }
+    }
+    if (pages > 1) {
+      term_printf("Page %u/%u. N: next, P: previous\n",
+                  (unsigned)(term_page + 1), (unsigned)pages);
     }
   }
 
@@ -224,6 +248,7 @@ static void term_enter_menu(void) {
   term_active = true;
   term_reset_input();
   term_refresh_apps_cache();
+  term_page = 0;
   display_term_start(TERM_SCREEN_SIZE_X, TERM_SCREEN_SIZE_Y);
   term_print_menu();
   SEND_COMMAND_TO_DISPLAY(DISPLAY_COMMAND_TERM);
@@ -315,6 +340,22 @@ static void term_input_char(char c) {
   if (c == '\n' || c == '\r') {
     term_render_char('\n');
     term_handle_selection();
+    display_term_refresh();
+    return;
+  }
+
+  // N and P turn the page while nothing has been typed.
+  if (input_length == 0 && (c == 'n' || c == 'N' || c == 'p' || c == 'P')) {
+    uint16_t pages = term_page_count();
+    bool next = (c == 'n' || c == 'N');
+    if (next && term_page + 1 < pages) {
+      term_page++;
+    } else if (!next && term_page > 0) {
+      term_page--;
+    } else {
+      return;
+    }
+    term_print_menu();
     display_term_refresh();
     return;
   }
