@@ -188,6 +188,7 @@ target_sources(${PROJECT_NAME} PRIVATE
         sdcard.c
         select.c
         term.c
+        uf2copy.c
         urlparse.c
         utc_time.c
         uuid.c

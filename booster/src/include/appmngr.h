@@ -89,11 +89,12 @@
 
 #define UF2_BLOCK_SIZE 512
 
-// Chunk size for the UF2 -> flash copy at app launch (storeUF2FileToFlash).
-// Only a batching buffer in front of flash_range_program, which programs
-// 256-byte pages: any multiple of FLASH_PAGE_SIZE writes byte-identical flash
-// contents. One flash sector is a natural granularity (it matches the erase
-// unit) and keeps the buffer small enough to live in bss.
+// Chunk size for the UF2 -> flash copy at app launch
+// (appmngr_copy_app_to_slot). Only a batching buffer in front of
+// flash_range_program, which programs 256-byte pages: any multiple of
+// FLASH_PAGE_SIZE writes byte-identical flash contents. One flash sector is a
+// natural granularity (it matches the erase unit) and keeps the buffer small
+// enough to live in bss.
 //
 // The buffer is STATIC, not malloc'd. History of why:
 //   - It used to be the SDK's FLASH_BLOCK_SIZE (64K) from the heap. Once
@@ -225,7 +226,13 @@ typedef enum {
   DOWNLOAD_LAUNCHAPP_NOTUUID_ERROR,
   // No config sector is free for the app, or the lookup table could not be
   // read or written.
-  DOWNLOAD_LAUNCHAPP_NOCONFIGSECTOR_ERROR
+  DOWNLOAD_LAUNCHAPP_NOCONFIGSECTOR_ERROR,
+  // The app's file could not be opened; the slot was not touched. Returned
+  // after the launch has stopped the network.
+  DOWNLOAD_LAUNCHAPP_FILE_ERROR,
+  // The copy into the slot stopped partway; the slot boots Booster. Returned
+  // after the launch has stopped the network.
+  DOWNLOAD_LAUNCHAPP_COPY_ERROR
 } download_launch_err_t;
 
 sdcard_info_t *appmngr_get_sdcard_info();
