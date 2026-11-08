@@ -10,6 +10,7 @@
 #ifndef LOOKUPTABLE_H
 #define LOOKUPTABLE_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 // The table maps each installed app to the config sector that holds its
@@ -91,5 +92,17 @@ int lookuptable_sanitize(uint8_t *table, uint16_t *table_length,
  */
 int lookuptable_move_to_end(const char *uuid, uint8_t *table,
                             uint16_t table_length);
+
+/**
+ * @brief Index of the least recently launched entry that is not pinned: the
+ * first entry, in launch order, whose UUID is not one of the num_pinned
+ * pinned UUIDs (NULL entries are ignored). That is the app whose settings
+ * make room on the card when every config sector is taken.
+ *
+ * @return The entry's index, or -1 if every entry is pinned or the table is
+ * empty.
+ */
+int lookuptable_least_recent(const uint8_t *table, uint16_t table_length,
+                             const char *const *pinned, size_t num_pinned);
 
 #endif  // LOOKUPTABLE_H

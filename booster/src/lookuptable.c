@@ -375,3 +375,25 @@ int lookuptable_move_to_end(const char *uuid, uint8_t *table,
   }
   return -3;
 }
+
+int lookuptable_least_recent(const uint8_t *table, uint16_t table_length,
+                             const char *const *pinned, size_t num_pinned) {
+  uint16_t num_entries = table_length / LOOKUP_ENTRY_SIZE;
+  for (uint16_t i = 0; i < num_entries; i++) {
+    const uint8_t *entry = table + (i * LOOKUP_ENTRY_SIZE);
+    if (entry[0] == 0 || !uuid_is_valid4((const char *)entry)) {
+      break;
+    }
+    bool is_pinned = false;
+    for (size_t k = 0; k < num_pinned; k++) {
+      if (pinned[k] != NULL && memcmp(entry, pinned[k], 36) == 0) {
+        is_pinned = true;
+        break;
+      }
+    }
+    if (!is_pinned) {
+      return i;
+    }
+  }
+  return -1;
+}

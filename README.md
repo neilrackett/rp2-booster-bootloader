@@ -393,6 +393,12 @@ The Booster microfirmware app is now installed in the flash memory of the device
 
 To return to the Booster app, the user needs to use the command menu on the microfirmware app to do it, or press the SELECT button for more than 10 seconds and then power off and power on the device and the computer.
 
+#### Settings of each app
+
+Each app keeps its settings in one of 30 slots in the device's flash memory. An app gets a slot the first time it is launched, not when it is installed, so apps you install but never run do not use one. When all 30 slots are in use, launching another app moves the settings of the app you launched least recently to the microSD card, as `<uuid>.cfg` in the apps folder, and that app gets them back the next time you launch it. So you can install and use any number of apps, and each keeps its settings.
+
+The `.cfg` files travel with the card: another device that launches the app restores those settings. Deleting an app removes its `.cfg` too, as do **Restore config only** and **Restore and launch** on the DEV APP card. While the **Development** catalog is selected, the DEV APP keeps its slot and its settings are never moved to the card.
+
 #### DEV APP: tools for microfirmware developers
 
 The **DEV APP** is the entry for a microfirmware you are writing. It uses a fixed UUID, `44444444-4444-4444-8444-444444444444`, reserved for development. To use it, select **Development - Local development only** as the apps catalog on the [Config view](#config-view), then install **DEV APP** from the Apps view like any other app. While the Development catalog is selected, the help at the top of the Apps view also describes its restore buttons.

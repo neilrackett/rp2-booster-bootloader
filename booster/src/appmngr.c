@@ -1271,6 +1271,141 @@ static int8_t appmngr_delete_config_sector(uint8_t sector) {
   return 0;
 }
 
+// Write data (FLASH_SECTOR_SIZE bytes) into config sector `sector`: erase,
+// then program, with core 1 parked and interrupts off as every flash write
+// here is.
+static int8_t appmngr_program_config_sector(uint8_t sector,
+                                            const uint8_t *data) {
+  if (sector >= appmngr_config_sector_count()) {
+    return -1;
+  }
+  uint32_t offs = ((uint32_t)&_config_flash_start - XIP_BASE) +
+                  (uint32_t)sector * FLASH_SECTOR_SIZE;
+  select_flashLockoutBegin();
+  uint32_t ints = save_and_disable_interrupts();
+  flash_range_erase(offs, FLASH_SECTOR_SIZE);
+  flash_range_program(offs, data, FLASH_SECTOR_SIZE);
+  restore_interrupts(ints);
+  select_flashLockoutEnd();
+  return 0;
+}
+
+// <apps folder>/<uuid><suffix>: the file that holds an app's settings while
+// its config sector belongs to another app (".cfg"), or that file while it
+// is being written (".cfg.tmp").
+static void appmngr_settings_file_path(char *out, size_t out_size,
+                                       const char *uuid, const char *suffix) {
+  snprintf(out, out_size, "%s/%.36s%s",
+           settings_find_entry(gconfig_getContext(), PARAM_APPS_FOLDER)->value,
+           uuid, suffix);
+}
+
+// Remove an app's settings file from the card, if it has one.
+static bool appmngr_delete_settings_file(const char *uuid) {
+  char path[256];
+  appmngr_settings_file_path(path, sizeof(path), uuid, ".cfg.tmp");
+  appmngr_fs_lock();
+  f_unlink(path);
+  appmngr_settings_file_path(path, sizeof(path), uuid, ".cfg");
+  bool removed = f_unlink(path) == FR_OK;
+  appmngr_fs_unlock();
+  return removed;
+}
+
+// Save the contents of config sector `sector`, which belongs to `uuid`, to
+// <uuid>.cfg on the card. Written as <uuid>.cfg.tmp, synced, then renamed,
+// so a power cut leaves either the previous .cfg or the new one. A blank
+// sector holds no settings (the app runs on its defaults): nothing is saved
+// and an old .cfg is removed, so the app gets its defaults back too.
+// Returns 0 when the settings are safe on the card.
+static int appmngr_save_settings_to_card(const char *uuid, uint8_t sector) {
+  const uint8_t *data = (const uint8_t *)((uint32_t)&_config_flash_start +
+                                          (uint32_t)sector * FLASH_SECTOR_SIZE);
+  bool blank = true;
+  for (size_t i = 0; i < FLASH_SECTOR_SIZE; i++) {
+    if (data[i] != 0xFF) {
+      blank = false;
+      break;
+    }
+  }
+  if (blank) {
+    appmngr_delete_settings_file(uuid);
+    DPRINTF("Swap: sector %u of %.36s is blank, nothing to save\n", sector,
+            uuid);
+    return 0;
+  }
+  char tmp_path[256];
+  char cfg_path[256];
+  appmngr_settings_file_path(tmp_path, sizeof(tmp_path), uuid, ".cfg.tmp");
+  appmngr_settings_file_path(cfg_path, sizeof(cfg_path), uuid, ".cfg");
+  appmngr_fs_lock();
+  FIL file;
+  UINT written = 0;
+  FRESULT res = f_open(&file, tmp_path, FA_WRITE | FA_CREATE_ALWAYS);
+  if (res == FR_OK) {
+    res = f_write(&file, data, FLASH_SECTOR_SIZE, &written);
+    if (res == FR_OK) {
+      res = f_sync(&file);
+    }
+    FRESULT closed = f_close(&file);
+    if (res == FR_OK) {
+      res = closed;
+    }
+  }
+  if (res == FR_OK && written == FLASH_SECTOR_SIZE) {
+    f_unlink(cfg_path);
+    res = f_rename(tmp_path, cfg_path);
+  } else if (res == FR_OK) {
+    res = FR_DISK_ERR;  // short write: the card is full
+  }
+  if (res != FR_OK) {
+    f_unlink(tmp_path);
+  }
+  appmngr_fs_unlock();
+  if (res != FR_OK) {
+    DPRINTF("Swap: cannot save %s (%d)\n", cfg_path, res);
+    return -1;
+  }
+  DPRINTF("Swap: settings of %.36s saved to %s\n", uuid, cfg_path);
+  return 0;
+}
+
+// Fill config sector `sector` for `uuid`: its saved settings when it has a
+// <uuid>.cfg of exactly one sector, otherwise erased (the app's defaults).
+static int appmngr_restore_settings_from_card(const char *uuid,
+                                              uint8_t sector) {
+  char cfg_path[256];
+  appmngr_settings_file_path(cfg_path, sizeof(cfg_path), uuid, ".cfg");
+  uint8_t *data = malloc(FLASH_SECTOR_SIZE);
+  bool restored = false;
+  if (data != NULL) {
+    appmngr_fs_lock();
+    FIL file;
+    UINT read = 0;
+    if (f_open(&file, cfg_path, FA_READ) == FR_OK) {
+      if (f_size(&file) == FLASH_SECTOR_SIZE &&
+          f_read(&file, data, FLASH_SECTOR_SIZE, &read) == FR_OK &&
+          read == FLASH_SECTOR_SIZE) {
+        restored = true;
+      } else {
+        DPRINTF("Swap: %s is not one %u-byte sector; using defaults\n",
+                cfg_path, (unsigned)FLASH_SECTOR_SIZE);
+      }
+      f_close(&file);
+    }
+    appmngr_fs_unlock();
+  }
+  int res;
+  if (restored) {
+    res = appmngr_program_config_sector(sector, data);
+    DPRINTF("Swap: settings of %.36s restored into sector %u\n", uuid, sector);
+  } else {
+    res = appmngr_delete_config_sector(sector);
+  }
+  free(data);
+  return res;
+}
+
 /**
  * Print the apps lookup table to stdout.
  *
@@ -1405,8 +1540,16 @@ void appmngr_sync_lookup_table() {
 
 // Give the app being launched its config sector and make it the most recently
 // launched entry of the lookup table (D-14 keeps launch order there). An app
-// that has a sector keeps it and its settings; one that has none gets the
-// lowest free sector, erased, so it starts from its defaults.
+// that has a sector keeps it and its settings. One that has none gets the
+// lowest free sector; when all are taken, the least recently launched app that
+// is not pinned gives its sector up after its settings are saved to the card.
+// The sector is then filled with the launched app's own saved settings, if it
+// has any on the card, or erased for its defaults.
+//
+// The order makes a power cut at any point harmless: the evicted settings are
+// on the card before its entry goes, and the launched app's entry is added only
+// after its sector holds its own settings. A cut in between leaves a sector no
+// entry points at, which the next launch hands out again.
 static download_launch_err_t appmngr_assign_launch_sector(const char *uuid) {
   uint8_t *table = malloc(LOOKUP_TABLE_SIZE);
   if (table == NULL) {
@@ -1417,6 +1560,7 @@ static download_launch_err_t appmngr_assign_launch_sector(const char *uuid) {
   uint16_t table_length = 0;
   appmngr_load_apps_lookup_table(table, &table_length);
   uint16_t num_sectors = appmngr_config_sector_count();
+  download_launch_err_t result = DOWNLOAD_LAUNCHAPP_NOCONFIGSECTOR_ERROR;
 
   int moved = lookuptable_move_to_end(uuid, table, table_length);
   if (moved >= 0) {
@@ -1431,20 +1575,51 @@ static download_launch_err_t appmngr_assign_launch_sector(const char *uuid) {
 
   int16_t sector =
       lookuptable_find_first_empty_sector(table, &table_length, num_sectors);
-  if (sector < 0 ||
-      lookuptable_update(uuid, (uint16_t)sector, table, &table_length) != 0 ||
-      appmngr_persist_app_lookup_table(table, table_length) != 0) {
-    DPRINTF("Launch: no config sector for %s\n", uuid);
-    free(table);
-    return DOWNLOAD_LAUNCHAPP_NOCONFIGSECTOR_ERROR;
+  if (sector < 0) {
+    // Every sector is taken. The DEV APP keeps its settings while the
+    // Development channel is selected, so a developer's settings survive
+    // between deploys.
+    const char *pinned[] = {devapi_isEnabled() ? DEVAPI_DEV_APP_UUID : NULL};
+    int victim = lookuptable_least_recent(table, table_length, pinned, 1);
+    if (victim < 0) {
+      DPRINTF("Launch: every config sector belongs to a pinned app\n");
+      goto done;
+    }
+    char victim_uuid[37] = {0};
+    memcpy(victim_uuid, table + (victim * LOOKUP_ENTRY_SIZE), 36);
+    int victim_sector =
+        lookuptable_get_sector(victim_uuid, table, &table_length);
+    if (victim_sector < 0 || victim_sector >= num_sectors ||
+        appmngr_save_settings_to_card(victim_uuid, (uint8_t)victim_sector) !=
+            0) {
+      DPRINTF("Launch: cannot move the settings of %s to the card\n",
+              victim_uuid);
+      goto done;
+    }
+    if (lookuptable_delete(victim_uuid, table, &table_length) != 0 ||
+        appmngr_persist_app_lookup_table(table, table_length) != 0) {
+      DPRINTF("Launch: cannot remove %s from the lookup table\n", victim_uuid);
+      goto done;
+    }
+    DPRINTF("Launch: sector %d of %s moved to the card\n", victim_sector,
+            victim_uuid);
+    sector = (int16_t)victim_sector;
   }
-  free(table);
-  if (appmngr_delete_config_sector((uint8_t)sector) != 0) {
-    DPRINTF("Launch: could not erase sector %d\n", sector);
-    return DOWNLOAD_LAUNCHAPP_NOCONFIGSECTOR_ERROR;
+
+  if (appmngr_restore_settings_from_card(uuid, (uint8_t)sector) != 0) {
+    DPRINTF("Launch: cannot prepare sector %d\n", sector);
+    goto done;
+  }
+  if (lookuptable_update(uuid, (uint16_t)sector, table, &table_length) != 0 ||
+      appmngr_persist_app_lookup_table(table, table_length) != 0) {
+    DPRINTF("Launch: cannot add %s to the lookup table\n", uuid);
+    goto done;
   }
   DPRINTF("Launch: %s gets sector %d\n", uuid, sector);
-  return DOWNLOAD_LAUNCHAPP_OK;
+  result = DOWNLOAD_LAUNCHAPP_OK;
+done:
+  free(table);
+  return result;
 }
 
 /*
@@ -1726,6 +1901,9 @@ download_delete_err_t appmngr_delete_app(const char *uuid) {
     f_unlink(upload_filename);
   }
 
+  // Settings kept on the card while the app had no config sector go too.
+  appmngr_delete_settings_file(uuid);
+
   // Now delete the entry in the app lookup table
   uint8_t *table = malloc(FLASH_SECTOR_SIZE);
   if (table == NULL) {
@@ -1790,9 +1968,11 @@ appmngr_config_erase_t appmngr_erase_app_config(const char *uuid) {
   appmngr_load_apps_lookup_table(table, &table_length);
   int sector = lookuptable_get_sector(uuid, table, &table_length);
   free(table);
+  // Settings saved on the card count as the app's settings too.
+  bool removed_file = appmngr_delete_settings_file(uuid);
   if (sector == LOOKUP_SECTOR_NOT_FOUND) {
     DPRINTF("Config erase: no config sector assigned to %s\n", uuid);
-    return APPMNGR_CONFIG_NOT_ASSIGNED;
+    return removed_file ? APPMNGR_CONFIG_ERASED : APPMNGR_CONFIG_NOT_ASSIGNED;
   }
   if (sector < 0) {
     DPRINTF("Config erase: lookup failed for %s (%d)\n", uuid, sector);
