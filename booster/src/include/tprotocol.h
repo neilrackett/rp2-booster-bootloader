@@ -22,7 +22,7 @@
 #define PROTOCOL_HEADER 0xABCD
 #define PROTOCOL_READ_RESTART_MICROSECONDS 10000
 #define MAX_PROTOCOL_PAYLOAD_SIZE \
-  2048 + 64  // 2048 bytes of payload plus 64 bytes of overhead for safety
+  (2048 + 64)  // 2048 bytes of payload plus 64 bytes of overhead for safety
 
 #define SHOW_COMMANDS 0  // Set to 1 to show commands received
 
@@ -101,6 +101,10 @@ static uint32_t new_header_found = 0;
 
 static TPParseStep nextTPstep = HEADER_DETECTION;
 
+// Frames dropped because their payload size was larger than the buffer. Only
+// read by the debug tools; it never resets.
+static volatile uint32_t tprotocol_oversized_frames = 0;
+
 // Placeholder structure for parsed data (declared in tprotocol.h)
 static TransmissionProtocol transmission = {0};
 
@@ -148,8 +152,17 @@ static inline __attribute__((always_inline)) void __not_in_flash_func(
 // --------------------------------------
 static inline __attribute__((always_inline)) void __not_in_flash_func(
     read_payload_size)(uint16_t data) {
+  if (data > MAX_PROTOCOL_PAYLOAD_SIZE) {
+    // More than the payload buffer holds: storing it would write past the
+    // buffer. Any program that reads ROM3 sequentially sends such a size
+    // ($ABCD, then the next words as command and size), and so can bus noise.
+    // Drop the frame and wait for the next header.
+    tprotocol_oversized_frames++;
+    nextTPstep = HEADER_DETECTION;
+    return;
+  }
+  transmission.payload_size = data;
   if (data > 0) {
-    transmission.payload_size = data;
     nextTPstep = PAYLOAD_READ_START;
   } else {
     // Zero payload => skip to end

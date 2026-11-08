@@ -22,6 +22,9 @@ Usage:
     python3 tools/dev/swd.py crash [--elf ELF]
     python3 tools/dev/swd.py postmortem [--elf ELF] [--leave-halted]
     python3 tools/dev/swd.py heap [--elf ELF] [--watch SECONDS] [--csv FILE]
+    python3 tools/dev/swd.py key TEXT [--enter] [--shift] [--scan N] [--elf ELF]
+    python3 tools/dev/swd.py inject COMMAND_ID [WORD ...] [--elf ELF]
+    python3 tools/dev/swd.py bus WORD ... [--elf ELF]
 
 `running` waits until the vector table register (VTOR) holds the ELF's RAM
 vector table, which the SDK's runtime init installs, and core 0 is not halted.
@@ -52,6 +55,16 @@ GPIO input override (IO_BANK0 GPIOn_CTRL.INOVER) for the hold time, so the
 firmware sees a real press without any code of its own. `short` holds 300 ms,
 `long` holds SELECT_LONG_RESET + 1 s (booster/src/include/select.h) and needs
 `--force`, because it is a factory reset. `release` clears a stuck override.
+
+`key`, `inject` and `bus` need a debug build: they write the debug mailbox
+(booster/src/include/devhooks.h) and wait until the main loop acknowledges it.
+`key` types TEXT one keystroke at a time as the ST would, then Return with
+`--enter`; `inject` sends any protocol command with the given 16-bit payload
+words after the random token. Both hand the command to the terminal as the
+parser would, so the parser itself is not involved. `bus` feeds raw words to
+the parser as if the ST had read them from ROM3 (header, command, size,
+payload and checksum are up to the caller), and prints how many oversized
+frames the parser has dropped since boot.
 
 `crash` explains the last reboot without stopping the RP: the watchdog reason
 and scratch registers, with code addresses resolved to source lines.
@@ -101,6 +114,16 @@ INOVER_SHIFT = 16
 INOVER_HIGH = 3
 SELECT_SHORT_MS = 300
 WATCHDOG_REASON = 0x40058008
+# DevhooksMailbox (booster/src/include/devhooks.h): offsets of its fields.
+MAILBOX_SYMBOL = "devhooksMailbox"
+MAILBOX_MAGIC = 0x444B4831
+MB_SEQ, MB_ACK, MB_KIND, MB_RESULT, MB_CMD, MB_SIZE, MB_PAYLOAD = (
+    4, 8, 12, 16, 20, 22, 24)
+MAILBOX_WORDS = 16
+KIND_PROTOCOL, KIND_BUS = 1, 3
+# The keystroke parameter as term_loop() decodes it: character in bits 0-7,
+# scan code in 16-23, shift in 24-31.
+KEY_SCAN_SHIFT, KEY_SHIFT_SHIFT = 16, 24
 WATCHDOG_SCRATCH0 = 0x4005800C
 GDB_PORT = 3333
 # Variables postmortem prints when the ELF has them; a build without one simply
@@ -614,6 +637,79 @@ def cmd_select(args: argparse.Namespace) -> int:
 
 
 
+def mailbox_request(elf: str, kind: int, command_id: int, words: list[int],
+                    timeout: float = 5.0) -> int:
+    """Send one request through the debug mailbox; return its result."""
+    if len(words) > MAILBOX_WORDS:
+        raise SwdError(f"at most {MAILBOX_WORDS} payload words")
+    sym = elf_symbols(elf, MAILBOX_SYMBOL).get(MAILBOX_SYMBOL)
+    if not sym:
+        raise SwdError(f"{os.path.basename(elf)} has no {MAILBOX_SYMBOL}: "
+                       "a debug build is needed")
+    base = sym[0]
+    magic, seq, ack = struct.unpack("<III", read_memory(base, 12))
+    if magic != MAILBOX_MAGIC:
+        raise SwdError(f"no mailbox at 0x{base:08x} (magic 0x{magic:08x})")
+    if seq != ack:
+        raise SwdError("the previous request was never acknowledged: "
+                       "is the main loop running?")
+    commands = [f"mww 0x{base + MB_KIND:08x} {kind}",
+                f"mwh 0x{base + MB_CMD:08x} {command_id}",
+                f"mwh 0x{base + MB_SIZE:08x} {len(words) * 2}"]
+    for i, word in enumerate(words):
+        commands.append(f"mwh 0x{base + MB_PAYLOAD + 2 * i:08x} {word & 0xFFFF}")
+    # seq last: the firmware acts as soon as seq differs from ack.
+    commands.append(f"mww 0x{base + MB_SEQ:08x} {ack + 1}")
+    openocd(*commands)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        new_ack, _, result = struct.unpack(
+            "<III", read_memory(base + MB_ACK, MB_RESULT + 4 - MB_ACK))
+        if new_ack == ack + 1:
+            return result
+        time.sleep(0.1)
+    raise SwdError(f"no acknowledge within {timeout:g} s: "
+                   "is the main loop running?")
+
+
+def send_protocol(elf: str, command_id: int, words: list[int]) -> None:
+    # The payload starts with the random token, which only matters to the ST.
+    for _ in range(10):
+        if mailbox_request(elf, KIND_PROTOCOL, command_id, [0, 0] + words):
+            return
+        time.sleep(0.1)
+    raise SwdError("the firmware kept another command pending")
+
+
+def cmd_key(args: argparse.Namespace) -> int:
+    elf = matching_elf(args.elf)
+    defs = include_defines()
+    command_id = (defs["APP_TERMINAL"] << 8) | defs["APP_TERMINAL_KEYSTROKE"]
+    text = args.text + ("\r" if args.enter else "")
+    for char in text:
+        param = (ord(char) | (args.scan << KEY_SCAN_SHIFT) |
+                 ((1 if args.shift else 0) << KEY_SHIFT_SHIFT))
+        send_protocol(elf, command_id, [param & 0xFFFF, param >> 16])
+    print(f"{len(text)} key(s) sent: {text!r}")
+    return 0
+
+
+def cmd_inject(args: argparse.Namespace) -> int:
+    elf = matching_elf(args.elf)
+    send_protocol(elf, int(args.command_id, 0),
+                  [int(w, 0) for w in args.words])
+    print(f"command {args.command_id} injected")
+    return 0
+
+
+def cmd_bus(args: argparse.Namespace) -> int:
+    elf = matching_elf(args.elf)
+    dropped = mailbox_request(elf, KIND_BUS, 0, [int(w, 0) for w in args.words])
+    print(f"{len(args.words)} word(s) fed to the parser; "
+          f"oversized frames dropped since boot: {dropped}")
+    return 0
+
+
 def resolve_address(elf: str, address: int) -> str:
     """`function at file:line` for a code address, or '' when not code."""
     # Booster runs from 0x10120000; the whole 2 MB flash is code or data.
@@ -858,6 +954,25 @@ def build_parser() -> argparse.ArgumentParser:
     se.add_argument("--force", action="store_true",
                     help="allow a long press")
     se.set_defaults(func=cmd_select)
+
+    k = sub.add_parser("key", help="type keystrokes as the ST would")
+    k.add_argument("text")
+    k.add_argument("--enter", action="store_true", help="then press Return")
+    k.add_argument("--shift", action="store_true")
+    k.add_argument("--scan", type=int, default=0)
+    k.add_argument("--elf")
+    k.set_defaults(func=cmd_key)
+
+    ij = sub.add_parser("inject", help="inject a protocol command")
+    ij.add_argument("command_id")
+    ij.add_argument("words", nargs="*")
+    ij.add_argument("--elf")
+    ij.set_defaults(func=cmd_inject)
+
+    bu = sub.add_parser("bus", help="feed raw ROM3 words to the parser")
+    bu.add_argument("words", nargs="+")
+    bu.add_argument("--elf")
+    bu.set_defaults(func=cmd_bus)
 
     cr = sub.add_parser("crash", help="explain the last reboot")
     cr.add_argument("--elf")

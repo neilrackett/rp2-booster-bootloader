@@ -15,7 +15,7 @@ console.
 | Tool | What it does |
 | --- | --- |
 | `flash.sh release\|debug` | Builds Booster out of tree into `builds/<type>`, flashes `booster.elf` over the probe and checks over SWD that the RP runs it, that flash matches the ELF and that it carries the new build ID. `--build-only` stops after the build. |
-| `swd.py` | Reads and drives the running RP: `running`, `verify`, `build-id`, `read`, `program`, `reset`, `resume`, `heap`, `crash`, `postmortem`, `screen`, `text`, `select`. `python3 tools/dev/swd.py --help` and the top of the file explain each. |
+| `swd.py` | Reads and drives the running RP: `running`, `verify`, `build-id`, `read`, `program`, `reset`, `resume`, `heap`, `crash`, `postmortem`, `screen`, `text`, `select`, and in debug builds `key`, `inject` and `bus`. `python3 tools/dev/swd.py --help` and the top of the file explain each. |
 | `console.py` | Captures the debug console (debug builds only, 921,600 baud) to `logs/console.log`: `watch` in one terminal, then `tail`, `since-boot`, `grep` and `wait` from anywhere. |
 | `testserver.py` | Catalogs and downloads over HTTP and HTTPS with every failure Booster must survive: errors, truncation, stalls, redirect loops, slow downloads, a wrong MD5, and `many-N` catalogs of N apps. |
 | `stackdepth.py` | Worst-case stack depth from GCC's call graph (`.ci` files from `measure_builds.sh`). |
@@ -46,6 +46,11 @@ device's build ID) and logs stay out of git.
 - **`postmortem` and `read` halt or touch the bus.** `postmortem` stops both cores for a few seconds,
   so the ST sees a dead cartridge meanwhile; everything else reads while the RP runs.
 - **`select long --force` is a factory reset.**
+- **Don't read flash while Booster writes it.** `build-id`, `verify`, and `read` of a `0x10...`
+  address go through XIP. During a launch, an install, or a settings save, Booster takes the flash
+  out of XIP to erase or program it, and a debugger read then can crash it: a HardFault with
+  interrupts off inside `flash_range_erase`, seen during a launch. Wait until the launch has
+  finished (Booster or the microfirmware is running again) before reading flash.
 - **`flash.sh` reports "not running" while a microfirmware is the boot app.** After the reset the
   device boots that microfirmware, whose vector table `running` does not recognise. The flash is
   still right: `swd.py verify` and `build-id` confirm it. Return to Booster, or check those two.
@@ -71,8 +76,12 @@ plain diff:
 - `console.py` recognises Booster's banner, `SidecarTridge Booster. v2.5.0 (date). DEBUG mode.`
   Booster's debug builds use the microfirmwares' 921,600 baud, as console.py expects.
 - Dropped, because Booster has none of what they read: `counters` and `ring` (the template's ROM3
-  capture ring), `shared` (its shared-variable block), and `key`, `app` and `inject` (its debug
-  mailbox).
+  capture ring), `shared` (its shared-variable block), and `app` (Booster defines no app commands).
+- The debug mailbox (`booster/src/include/devhooks.h`) is the template's, polled from the manager's
+  main loop. `key` types a whole string, and `--enter` adds Return, so `key 12 --enter` launches
+  app 12. `inject` hands its command to the terminal, as the template's does. `bus` is Booster's
+  own: it feeds raw words to the ROM3 parser with interrupts off, so malformed frames can be
+  tested without an ST program.
 - `testserver.py` keeps the routes and the TLS set-up and replaces the ROM catalog with Booster's
   JSON catalog.
 

@@ -8,6 +8,11 @@
 
 #include "mngr.h"
 
+#include "devhooks.h"  // Debug-only SWD mailbox; include in this file only
+
+// How long the Atari gets to see the reset command before the RP reboots.
+#define MNGR_ATARI_RESET_MS 1000
+
 static firmware_upgrade_state_t firmware_upgrade_state = FIRMWARE_UPGRADE_IDLE;
 // True while the optional upgrade.md5 companion file is being fetched, false
 // once the real image download is in flight. See mngr_firmwareUpgradeStart().
@@ -38,6 +43,22 @@ static void mngr_enter_offline_mode(uint8_t wifi_status, const char *details,
       wifi_status, NULL, NULL, status_details,
       (mac_str != NULL && mac_str[0] != '\0') ? mac_str : NULL);
   display_refresh();
+}
+
+// Tell the Atari to reset, and keep answering its commands meanwhile. The
+// Atari reads the command between two of its own, and it sends one every
+// frame while a key is held down, then waits for the answer. Asleep here,
+// Booster would not answer, the Atari would still be waiting when the RP
+// reboots, and it would never reset. Answering a key can redraw the screen,
+// which writes its own display command, so the reset is written again.
+static void mngr_reset_atari(void) {
+  absolute_time_t until = make_timeout_time_ms(MNGR_ATARI_RESET_MS);
+  SEND_COMMAND_TO_DISPLAY(DISPLAY_COMMAND_RESET);
+  while (absolute_time_diff_us(get_absolute_time(), until) > 0) {
+    if (term_loop()) {
+      SEND_COMMAND_TO_DISPLAY(DISPLAY_COMMAND_RESET);
+    }
+  }
 }
 
 int mngr_init() {
@@ -550,9 +571,7 @@ int mngr_init() {
       if (absolute_time_diff_us(get_absolute_time(), reboot_time) < 0) {
         DPRINTF("Rebooting\n");
         device_reset = false;
-        // Send the reboot command
-        SEND_COMMAND_TO_DISPLAY(DISPLAY_COMMAND_RESET);
-        sleep_ms(1000);
+        mngr_reset_atari();
         reset_device();
       }
     }
@@ -577,9 +596,7 @@ int mngr_init() {
             sleep_ms(30000);
           }
         } else {
-          // Send the reboot command
-          SEND_COMMAND_TO_DISPLAY(DISPLAY_COMMAND_RESET);
-          sleep_ms(1000);
+          mngr_reset_atari();
           reset_deviceAndEraseFlash();
         }
       }
@@ -587,6 +604,7 @@ int mngr_init() {
 
     // Check remote commands
     term_loop();
+    devhooks_poll();
   }
 }
 
