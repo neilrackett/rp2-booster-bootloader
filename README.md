@@ -154,6 +154,7 @@ Install the required dependencies:
 - CMake
 - Python 3
 - GCC ARM embedded toolchain (`arm-none-eabi-*`)
+- Perl, which the Booster build uses to pack the web pages into the firmware. The build stops if it is missing
 - `stcmd` tooling for the embedded Atari ST terminal firmware
 
 The root `version.txt` file defines the release string and is copied into the subprojects by the build scripts.
@@ -344,7 +345,7 @@ In **Manager mode**, the Booster app tries to connect to your configured WiFi ne
 
 If your network supports `.local` name resolution, you can access the web interface using `http://sidecart.local`. Otherwise, use the IP address shown on the Atari ST screen: the one assigned by your DHCP server, or the static address set on the [Network view](#network-view) or in a [`.wificonf` file](#configuring-wifi-from-a-file).
 
-The menu at the top of the web interface opens the [Apps](#apps-view), [Network](#network-view) and [Config](#config-view) views. Its last three items open in a new tab: **Help** goes to the online documentation, **Report Issue** to the page for reporting a problem, and **News** to the [SidecarTridge news channel on Telegram](https://t.me/s/sidecartridgenews).
+The menu at the top of the web interface opens the [Apps](#apps-view), [Network](#network-view) and [Config](#config-view) views. Its last three items open in a new tab: **Help** goes to the online documentation, **Report Issue** to the page for reporting a problem, and **News** to the [SidecarTridge news channel on Telegram](https://t.me/s/sidecartridgenews). The [Upgrade view](#upgrade-view) is not in the menu: it opens from the banner shown when a new firmware version is available.
 
 If WiFi retries are exhausted, Booster falls back to an **offline Manager mode**. In that state network features are disabled, but the Atari ST terminal remains available so you can still boot already-downloaded microfirmwares manually.
 
@@ -448,6 +449,26 @@ It also provides two buttons to reboot the device:
 
 - **Reboot the device**: Reboot the device and load the microfirmware app in flash memory. This is the normal way to reboot the device.
 - **Restore to the default fabric settings**: Reboot the device and load the Booster app in **Factory mode**. This is useful to reset the WiFi configuration or return the device to its default setup.
+
+### Upgrade view
+
+The **Upgrade view** installs a new version of the Booster firmware over WiFi. It has no entry in the menu. When Booster starts in Manager mode it checks the latest published version, and if it is newer than the one running, a **Firmware update available** banner appears at the top of the Apps, Network and Config views. The banner shows the new version, a link to the CHANGELOG and an **Upgrade** button that opens this view.
+
+The upgrade has two steps. Keep the page open and do not refresh it until it finishes.
+
+1. **Download.** Click **Continue upgrading**. The device downloads the checksum of the new firmware (`upgrade.md5`) and then the firmware itself (`upgrade.bin`) to the apps folder on the microSD card. A progress bar shows how much has arrived. When the download completes, the device checks the firmware against the checksum. This can take up to two minutes, depending on your network.
+2. **Install.** Click **Confirm firmware upgrade**. The device writes the new firmware to its flash memory and restarts. After 20 seconds the page reloads the web interface.
+
+Do not power off the device while it installs.
+
+The upgrade is refused, and nothing is written to flash, if the checksum file cannot be downloaded or read, or if the downloaded firmware does not match it. The page shows the reason, for example *Checksum mismatch: the download is corrupt or incomplete*, and a **Back to Home** button. The current firmware keeps running, so you can try again later.
+
+After the upgrade:
+
+- The device starts in Manager mode with the new firmware.
+- The WiFi and network settings, the Config view settings and the settings saved by each microfirmware are kept.
+- The microfirmware that was in the device is replaced by the placeholder that ships with the firmware. The app is still on the microSD card: launch it again from the [Apps view](#apps-view).
+- The downloaded `upgrade.bin` is deleted from the microSD card.
 
 
 ## License
