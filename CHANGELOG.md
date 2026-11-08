@@ -1,6 +1,6 @@
 # Changelog
 
-## v2.4.3 (unreleased)
+## v2.5.0 (unreleased)
 
 _In development. Sections below are filled in as epics land and finalised at tag time._
 
