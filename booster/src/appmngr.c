@@ -1235,9 +1235,18 @@ const char *appmngr_download_error_to_str(download_err_t err) {
       return "HTTP error";
     case DOWNLOAD_MD5UNAVAILABLE_ERROR:
       return "Firmware checksum (upgrade.md5) missing or unreadable";
+    case DOWNLOAD_NOCONFIGSECTOR_ERROR:
+      return "All settings slots are in use: delete an app to install another";
     default:
       return "Unknown error";
   }
+}
+
+// How many 4K config sectors the linker script reserves: one per app.
+static uint16_t appmngr_config_sector_count(void) {
+  return (uint16_t)(((uint32_t)&_global_lookup_flash_start -
+                     (uint32_t)&_config_flash_start) /
+                    FLASH_SECTOR_SIZE);
 }
 
 static int8_t appmngr_delete_config_sector(uint8_t sector) {
@@ -1339,6 +1348,13 @@ void appmngr_load_apps_lookup_table(uint8_t *table, uint16_t *length) {
 
 static int8_t appmngr_persist_app_lookup_table(const uint8_t *table,
                                                uint16_t table_length) {
+  // The table is one flash sector. Anything longer would be programmed into
+  // the next sector, the global settings.
+  if (table_length > LOOKUP_TABLE_SIZE) {
+    DPRINTF("Lookup table of %u bytes does not fit its %u-byte sector\n",
+            table_length, (unsigned)LOOKUP_TABLE_SIZE);
+    return -1;
+  }
   uint32_t flash_start = (uint32_t)&_global_lookup_flash_start;
   uint32_t config_flash_length = (uint32_t)&_global_config_flash_start -
                                  (uint32_t)&_global_lookup_flash_start;
@@ -1375,7 +1391,11 @@ void appmngr_sync_lookup_table() {
   memset(table, 0, sizeof(table));
   uint16_t table_len = 0;
   appmngr_load_apps_lookup_table(table, &table_len);
-  bool changed = false;
+  // Firmware before v2.5.0 handed out sectors past the last config sector
+  // once more than 30 apps were installed. Drop those entries, and any that
+  // share a sector, so their apps get a sector of their own again.
+  bool changed = lookuptable_sanitize(table, &table_len,
+                                      appmngr_config_sector_count()) > 0;
 
   // 2) Open apps folder from settings
   char apps_folder[256] = {0};
@@ -1441,9 +1461,13 @@ void appmngr_sync_lookup_table() {
     }
 
     // app_info.uuid should now be set; add a new entry with next free sector
-    int16_t next_sector =
-        lookuptable_find_first_empty_sector(table, &table_len);
-    if (next_sector < 0) next_sector = 0;  // fallback
+    int16_t next_sector = lookuptable_find_first_empty_sector(
+        table, &table_len, appmngr_config_sector_count());
+    if (next_sector < 0) {
+      DPRINTF("sync: no free config sector for %.*s; left without one\n", 36,
+              app_info.uuid);
+      continue;
+    }
 
     if (lookuptable_update(app_info.uuid, (uint16_t)next_sector, table,
                            &table_len) == 0) {
@@ -1814,6 +1838,13 @@ appmngr_config_erase_t appmngr_erase_app_config(const char *uuid) {
   if (sector < 0) {
     DPRINTF("Config erase: lookup failed for %s (%d)\n", uuid, sector);
     return APPMNGR_CONFIG_ERASE_FAILED;
+  }
+  if (sector >= appmngr_config_sector_count()) {
+    // Never an address: a sector past the last one is the lookup table or
+    // the global settings. The next boot's sync drops the entry.
+    DPRINTF("Config erase: %s points at sector %d, which does not exist\n",
+            uuid, sector);
+    return APPMNGR_CONFIG_NOT_ASSIGNED;
   }
   if (appmngr_delete_config_sector((uint8_t)sector) != 0) {
     DPRINTF("Config erase: could not erase sector %d\n", sector);
@@ -2329,25 +2360,30 @@ download_err_t appmngr_finish_download_app() {
   // If the download is an update, don't delete the config sector
   if (!download_update) {
     // Update the table
-    uint16_t new_sector =
-        lookuptable_find_first_empty_sector(table, &table_length);
-    res = lookuptable_update(app_info.uuid, new_sector, table, &table_length);
-
-    // Persist the table if ok
+    int16_t new_sector = lookuptable_find_first_empty_sector(
+        table, &table_length, appmngr_config_sector_count());
+    if (new_sector < 0) {
+      free(table);
+      return DOWNLOAD_NOCONFIGSECTOR_ERROR;
+    }
+    res = lookuptable_update(app_info.uuid, (uint16_t)new_sector, table,
+                             &table_length);
+    if (res != 0) {
+      DPRINTF("Cannot add %.*s to the app lookup table: %d\n", 36,
+              app_info.uuid, res);
+      free(table);
+      return DOWNLOAD_NOCONFIGSECTOR_ERROR;
+    }
+    res = appmngr_persist_app_lookup_table(table, table_length);
     if (res == -1) {
-      DPRINTF("Something went wrong updating the app lookup table.\n");
+      DPRINTF("There was something wrong persisting the app lookup table.\n");
     } else {
-      res = appmngr_persist_app_lookup_table(table, table_length);
-      if (res == -1) {
-        DPRINTF("There was something wrong persisting the app lookup table.\n");
-      } else {
-        DPRINTF("App lookup table pesisted!\n");
-      }
+      DPRINTF("App lookup table pesisted!\n");
     }
     free(table);
 
     // Now delete the config sector of the app
-    res = appmngr_delete_config_sector(new_sector);
+    res = appmngr_delete_config_sector((uint8_t)new_sector);
     if (res != 0) {
       DPRINTF("Error deleting config sector: %i\n", res);
       return DOWNLOAD_CANNOTDELETECONFIGSECTOR_ERROR;

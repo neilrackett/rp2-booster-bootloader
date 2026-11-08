@@ -198,6 +198,7 @@ typedef enum {
   DOWNLOAD_HTTP_ERROR,
   // Appended, not inserted: these values surface in the UI and in logs.
   DOWNLOAD_MD5UNAVAILABLE_ERROR,
+  DOWNLOAD_NOCONFIGSECTOR_ERROR,
 } download_err_t;
 
 typedef enum {
