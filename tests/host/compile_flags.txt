@@ -1,0 +1,4 @@
+-std=gnu11
+-Ishim
+-isystem
+../../booster/src/include

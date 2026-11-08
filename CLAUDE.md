@@ -36,9 +36,19 @@ Toolchain: CMake, Python 3, `arm-none-eabi-*`, and **Perl** (the Booster CMake a
 
 Flash for quick validation: `picotool load -xv dist/rp-booster-<version>.uf2`.
 
-There is no test suite — "done" means a clean root build plus on-device verification (see AGENTS.md §"What 'done' looks like"). CI parity is what PR builds run:
+Host tests cover the firmware's pure logic (URL parsing, UUIDs, the apps lookup table, version comparison, the WiFi and `.wificonf` parsers, the ROM3 command parser). They build with the host compiler under ASan and UBSan, need no SDK, and run in seconds:
 
 ```sh
+make -C tests/host test         # must pass
+make -C tests/host known-bugs   # each bug_*.c shows a defect not fixed yet, and must still fail
+```
+
+Each `tests/host/test_*.c` names the firmware sources it compiles on its first line (`// units: booster/src/x.c`), with `tests/host/shim/` standing in for the few SDK headers they include. Logic that needs testing goes in an SDK-free unit like those, not in a file that pulls in lwIP or cyw43. When a fix makes a `bug_*.c` pass, rename it to `test_*.c` in the same change. The framework is md-rom-emulator's (`tests/host` at `3cd573d`).
+
+The host tests do not replace the hardware: "done" still means a clean root build plus on-device verification (see AGENTS.md §"What 'done' looks like"). CI parity is what PR builds run:
+
+```sh
+make -C tests/host test known-bugs
 ./build.sh pico_w release image
 ./build.sh pico_w debug
 ```

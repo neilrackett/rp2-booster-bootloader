@@ -212,15 +212,20 @@ In `term/atarist/`, then rebuild to refresh `booster/src/include/term_firmware.h
 
 Before considering a change complete:
 
-1. Root build succeeds:
+1. Host tests pass, and every known bug still fails (a fixed one is renamed from `bug_*.c` to `test_*.c`):
+
+   ```sh
+   make -C tests/host test known-bugs
+   ```
+2. Root build succeeds:
 
    ```sh
    ./build.sh pico_w debug
    ```
-2. `dist/` contains `rp-booster-<version>*.uf2`.
-3. If `upgrader/` or `term/atarist/` changed: confirm the embedded headers were regenerated.
-4. No obvious style regressions (clang-format) in files you touched.
-5. Behavior matches README expectations.
+3. `dist/` contains `rp-booster-<version>*.uf2`.
+4. If `upgrader/` or `term/atarist/` changed: confirm the embedded headers were regenerated.
+5. No obvious style regressions (clang-format) in files you touched.
+6. Behavior matches README expectations.
 
 ---
 
