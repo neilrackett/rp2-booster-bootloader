@@ -187,6 +187,7 @@ target_sources(${PROJECT_NAME} PRIVATE
         select.c
         term.c
         urlparse.c
+        utc_time.c
         uuid.c
         vercmp.c
         version.c
