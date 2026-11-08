@@ -109,7 +109,9 @@ You can load the UF2 with `picotool`:
 picotool load -xv dist/rp-booster-<version>.uf2
 ```
 
-For serious work, prefer debugging with a probe + VS Code (see `.vscode/` and the SidecarTridge docs).
+With a Raspberry Pi Debug Probe, use `tools/dev/` instead (see `tools/dev/README.md`): `tools/dev/flash.sh release|debug` builds out of tree, flashes Booster's region only and verifies over SWD that the device runs the new build; `tools/dev/swd.py` reads the running device (build ID, heap, crash reason, the Atari screen, backtraces); `tools/dev/console.py` captures the debug console at 921,600 baud. Flash only with `flash.sh` or `swd.py program`, never OpenOCD's `program`: they stop the cartridge emulation's PIO and DMA first. A reset does not reset the Pico W's radio: power-cycle before any network check.
+
+VS Code with the probe (see `.vscode/`) remains the way to step through code.
 
 ---
 
