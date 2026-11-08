@@ -109,7 +109,9 @@ You can load the UF2 with `picotool`:
 picotool load -xv dist/rp-booster-<version>.uf2
 ```
 
-For serious work, prefer debugging with a probe + VS Code (see `.vscode/` and the SidecarTridge docs).
+With a Raspberry Pi Debug Probe, use `tools/dev/` instead (see `tools/dev/README.md`): `tools/dev/flash.sh release|debug` builds out of tree, flashes Booster's region only and verifies over SWD that the device runs the new build; `tools/dev/swd.py` reads the running device (build ID, heap, crash reason, the Atari screen, backtraces); `tools/dev/console.py` captures the debug console at 921,600 baud. Flash only with `flash.sh` or `swd.py program`, never OpenOCD's `program`: they stop the cartridge emulation's PIO and DMA first. A reset does not reset the Pico W's radio: power-cycle before any network check.
+
+VS Code with the probe (see `.vscode/`) remains the way to step through code.
 
 ---
 
@@ -212,15 +214,20 @@ In `term/atarist/`, then rebuild to refresh `booster/src/include/term_firmware.h
 
 Before considering a change complete:
 
-1. Root build succeeds:
+1. Host tests pass, and every known bug still fails (a fixed one is renamed from `bug_*.c` to `test_*.c`):
+
+   ```sh
+   make -C tests/host test known-bugs
+   ```
+2. Root build succeeds:
 
    ```sh
    ./build.sh pico_w debug
    ```
-2. `dist/` contains `rp-booster-<version>*.uf2`.
-3. If `upgrader/` or `term/atarist/` changed: confirm the embedded headers were regenerated.
-4. No obvious style regressions (clang-format) in files you touched.
-5. Behavior matches README expectations.
+3. `dist/` contains `rp-booster-<version>*.uf2`.
+4. If `upgrader/` or `term/atarist/` changed: confirm the embedded headers were regenerated.
+5. No obvious style regressions (clang-format) in files you touched.
+6. Behavior matches README expectations.
 
 ---
 

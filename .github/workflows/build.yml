@@ -6,6 +6,18 @@ on:
   workflow_dispatch:
 
 jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout the code
+      uses: actions/checkout@v3
+
+    - name: Host tests (the firmware's pure logic, under ASan and UBSan)
+      run: make -C tests/host test
+
+    - name: Known bugs (each bug_*.c must still fail until its fix renames it)
+      run: make -C tests/host known-bugs
+
   build:
     runs-on: ${{ matrix.os }}
     env:

@@ -36,9 +36,37 @@ Toolchain: CMake, Python 3, `arm-none-eabi-*`, and **Perl** (the Booster CMake a
 
 Flash for quick validation: `picotool load -xv dist/rp-booster-<version>.uf2`.
 
-There is no test suite — "done" means a clean root build plus on-device verification (see AGENTS.md §"What 'done' looks like"). CI parity is what PR builds run:
+### Debug Probe tools (`tools/dev/`)
+
+With a Raspberry Pi Debug Probe on the cartridge's SWD pins (and its UART lead on GPIO 0/1 for the console), these build, flash and inspect the real device without the firmware's help. `tools/dev/README.md` has the details and what differs from md-microfirmware-template, where they come from.
 
 ```sh
+tools/dev/flash.sh release|debug         # out-of-tree build, flash Booster's region, verify, build ID
+python3 tools/dev/swd.py build-id        # which build the device runs (release_build_id in flash)
+python3 tools/dev/swd.py screen out.png  # the Atari screen, read from the cartridge window
+python3 tools/dev/swd.py postmortem      # a hung device: both cores' backtraces and state
+python3 tools/dev/console.py watch       # debug console, 921,600 baud (debug builds only)
+python3 tools/dev/testserver.py          # catalogs and failing downloads over HTTP and HTTPS
+```
+
+- **Flash only with `tools/dev/flash.sh` or `swd.py program`,** never with OpenOCD's `program`: they stop the cartridge emulation's PIO and DMA first, which keep writing RAM while the cores are halted.
+- **Power-cycle before any network check.** Every reset from the tools (and the watchdog) restarts the RP2040 but not the Pico W's CYW43 radio, which may then never rejoin WiFi.
+- **`flash.sh` never touches `booster/build`, `dist/` or the submodules,** unlike `./build.sh`, so it is safe while other work is in progress. It writes Booster's region only; the microfirmware slot and every setting stay.
+- Only one program can read the probe's serial port: close CoolTerm before `console.py watch`, and stop `console.py` before opening CoolTerm.
+
+Host tests cover the firmware's pure logic (URL parsing, UUIDs, the apps lookup table, version comparison, the WiFi and `.wificonf` parsers, the ROM3 command parser). They build with the host compiler under ASan and UBSan, need no SDK, and run in seconds:
+
+```sh
+make -C tests/host test         # must pass
+make -C tests/host known-bugs   # each bug_*.c shows a defect not fixed yet, and must still fail
+```
+
+Each `tests/host/test_*.c` names the firmware sources it compiles on its first line (`// units: booster/src/x.c`), with `tests/host/shim/` standing in for the few SDK headers they include. Logic that needs testing goes in an SDK-free unit like those, not in a file that pulls in lwIP or cyw43. When a fix makes a `bug_*.c` pass, rename it to `test_*.c` in the same change. The framework is md-rom-emulator's (`tests/host` at `3cd573d`).
+
+The host tests do not replace the hardware: "done" still means a clean root build plus on-device verification (see AGENTS.md §"What 'done' looks like"). CI parity is what PR builds run:
+
+```sh
+make -C tests/host test known-bugs
 ./build.sh pico_w release image
 ./build.sh pico_w debug
 ```

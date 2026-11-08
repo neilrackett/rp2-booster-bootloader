@@ -19,6 +19,7 @@
 #include "debug.h"
 #include "gconfig.h"
 #include "httpc/httpc.h"
+#include "lookuptable.h"
 #include "lwip/altcp_tls.h"
 #include "lwip/apps/httpd.h"
 #include "md5/md5.h"
@@ -29,6 +30,8 @@
 #include "pico/stdlib.h"
 #include "reset.h"
 #include "sdcard.h"
+#include "urlparse.h"
+#include "uuid.h"
 
 // Sanity caps on Content-Length, checked before we start writing a download to
 // the SD card.
@@ -111,26 +114,9 @@
 // fragmentation sensitivity, and it leaves the heap free for TLS.
 #define APP_FLASH_COPY_CHUNK_SIZE FLASH_SECTOR_SIZE
 
-// Each lookup table entry is 38 bytes:
-//   - 36 bytes for the UUID
-//   - 2 bytes for the sector (page number)
-#define LOOKUP_ENTRY_SIZE 38
 #define APPMNGR_MAX_INSTALLED_APPS (FLASH_SECTOR_SIZE / LOOKUP_ENTRY_SIZE)
 #define APPMNGR_INSTALLED_APP_NAME_LENGTH 64
 #define APPMNGR_INSTALLED_APP_VERSION_LENGTH 16
-
-typedef struct {
-  char protocol[16];
-  char host[128];
-  // A redirect target can be far longer than the URL originally requested.
-  // GitHub release assets end at a signed storage URL whose query string alone
-  // runs past 900 characters (SAS token plus JWT), so 256 truncated it and the
-  // follow-up request went to a mangled path.
-  char uri[1536];
-  // Explicit port from a "host:port" URL, or 0 to let the scheme decide
-  // (80 for http, 443 for https).
-  uint16_t port;
-} url_components_t;
 
 typedef struct {
   bool ready;

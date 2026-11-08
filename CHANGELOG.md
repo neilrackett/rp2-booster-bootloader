@@ -7,6 +7,11 @@ _In development. Sections below are filled in as epics land and finalised at tag
 ### New features
 - **News in the web interface menu.** The menu at the top of the Apps, Network and Config pages now ends with **News**, to the right of **Report Issue**. It opens the [SidecarTridge news channel on Telegram](https://t.me/s/sidecartridgenews) in a new tab.
 
+### For developers
+- **Host tests.** `make -C tests/host test` checks the firmware's parsers, the apps lookup table and the time conversions on the computer, in seconds, under the address and undefined-behaviour sanitizers; it also runs on every pull request. `make -C tests/host known-bugs` lists the defects that are not fixed yet.
+- **Debug Probe tools.** `tools/dev/` builds, flashes and verifies Booster over a Raspberry Pi Debug Probe, tells which build the device runs, captures the Atari screen and the debug console, and prints both cores' backtraces from a hung device. `tools/dev/testserver.py` serves catalogs and failing downloads for testing. See [tools/dev/README.md](tools/dev/README.md).
+- **Builds on a Mac fit like CI's.** Built with the Arm GNU toolchain, Booster was 26 KB bigger than the released firmware and a debug build did not fit its flash slot. Both now match CI's within about 1 KB, and the released firmware itself is 12 KB smaller. The debug console runs at 921,600 baud, as in the microfirmwares.
+
 ---
 
 ## v2.4.2 (2026-09-30) - release
