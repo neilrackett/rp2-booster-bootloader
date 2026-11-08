@@ -24,7 +24,8 @@
 #define TERM_APPS_PER_PAGE 18
 
 static TransmissionProtocol last_protocol;
-static bool last_protocol_valid = false;
+// Set by the DMA interrupt when a command arrives, cleared by term_loop().
+static volatile bool last_protocol_valid = false;
 static bool term_active = false;
 
 static uint32_t memory_shared_address = 0;
@@ -69,6 +70,32 @@ static void __not_in_flash_func(handle_protocol_checksum_error)(
   DPRINTF("Checksum error detected (ID=%u, Size=%u)\n", protocol->command_id,
           protocol->payload_size);
 }
+
+#if defined(_DEBUG) && (_DEBUG != 0)
+bool term_injectProtocol(uint16_t commandId, const uint16_t *payload,
+                         uint16_t payloadSize) {
+  if (last_protocol_valid || payloadSize > sizeof(last_protocol.payload)) {
+    return false;
+  }
+  last_protocol.command_id = commandId;
+  last_protocol.payload_size = payloadSize;
+  last_protocol.bytes_read = payloadSize;
+  memcpy(last_protocol.payload, payload, payloadSize);
+  last_protocol_valid = true;
+  return true;
+}
+
+uint32_t term_injectBusWords(const uint16_t *words, uint16_t count) {
+  // Interrupts off, so the ROM3 interrupt cannot interleave its own words.
+  uint32_t ints = save_and_disable_interrupts();
+  for (uint16_t i = 0; i < count; i++) {
+    tprotocol_parse(words[i], handle_protocol_command,
+                    handle_protocol_checksum_error);
+  }
+  restore_interrupts(ints);
+  return tprotocol_oversized_frames;
+}
+#endif
 
 static void term_reset_input(void) {
   memset(input_buffer, 0, sizeof(input_buffer));
@@ -293,7 +320,8 @@ static void term_handle_selection(void) {
     return;
   }
 
-  if ((uint16_t)selected_index > installed_app_count) {
+  // Compare the whole number: cast to 16 bits, 65536 would pass as 0.
+  if (selected_index > installed_app_count) {
     term_show_status("Invalid app number");
     return;
   }
@@ -372,8 +400,9 @@ static void term_input_char(char c) {
   }
 }
 
-void __not_in_flash_func(term_loop)(void) {
-  if (last_protocol_valid) {
+bool __not_in_flash_func(term_loop)(void) {
+  bool handled = last_protocol_valid;
+  if (handled) {
     uint32_t random_token = TPROTO_GET_RANDOM_TOKEN(last_protocol.payload);
     uint16_t *payloadPtr = ((uint16_t *)(last_protocol).payload);
 
@@ -437,6 +466,11 @@ void __not_in_flash_func(term_loop)(void) {
         break;
     }
 
+    // Clear the flag before the token goes out: the token tells the Atari to
+    // send its next command, which can arrive before this function returns.
+    // Cleared afterwards, that command would be dropped and the Atari would
+    // wait for a token that never comes.
+    last_protocol_valid = false;
     if (memory_random_token_address != 0) {
       TPROTO_SET_RANDOM_TOKEN(memory_random_token_address, random_token);
 
@@ -445,5 +479,5 @@ void __not_in_flash_func(term_loop)(void) {
                               new_random_seed_token);
     }
   }
-  last_protocol_valid = false;
+  return handled;
 }

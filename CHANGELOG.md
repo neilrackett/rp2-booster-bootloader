@@ -16,10 +16,15 @@ _In development. Sections below are filled in as epics land and finalised at tag
 - **The app list survives a power cut while it is being saved.** A copy is kept on the microSD card (`.lookup` in the apps folder) and put back at the next start if the copy in flash was cut short.
 - **A launch could hang the device.** Rarely, launching an app froze Booster while it stopped the network. Fixed.
 - **A failed launch no longer retries forever,** and the Atari screen says why it failed.
+- **A program reading the cartridge could corrupt Booster's memory.** Booster took the size of each command from the Atari as given, so a program that reads the cartridge's ROM area in sequence, or noise on the bus, could make it write up to 64 KB past its command buffer. Commands larger than the buffer are now dropped.
+- **Typing a large app number on the Atari could crash the device.** A number such as 65536 was checked as 0 but used in full. Any number past the last app now says "Invalid app number".
+- **The Atari did not reset after a launch while a key was held down.** The device restarted into the new app, but the Atari kept running the app list against it. Booster now keeps answering the Atari until it has seen the reset.
+- **A keystroke on the Atari could be lost and leave it waiting.** Booster cleared its "command received" flag after answering, so a key the Atari sent right after the answer could be dropped.
 
 ### For developers
 - **Host tests.** `make -C tests/host test` checks the firmware's parsers, the apps lookup table and the time conversions on the computer, in seconds, under the address and undefined-behaviour sanitizers; it also runs on every pull request. `make -C tests/host known-bugs` lists the defects that are not fixed yet.
 - **Debug Probe tools.** `tools/dev/` builds, flashes and verifies Booster over a Raspberry Pi Debug Probe, tells which build the device runs, captures the Atari screen and the debug console, and prints both cores' backtraces from a hung device. `tools/dev/testserver.py` serves catalogs and failing downloads for testing. See [tools/dev/README.md](tools/dev/README.md).
+- **Drive the Atari terminal from the Debug Probe.** In a debug build, `tools/dev/swd.py key` types into the Atari terminal, `inject` sends any terminal command, and `bus` feeds raw words to the cartridge command parser, so the terminal can be tested with no one at the Atari.
 - **Builds on a Mac fit like CI's.** Built with the Arm GNU toolchain, Booster was 26 KB bigger than the released firmware and a debug build did not fit its flash slot. Both now match CI's within about 1 KB, and the released firmware itself is 12 KB smaller. The debug console runs at 921,600 baud, as in the microfirmwares.
 
 ---
