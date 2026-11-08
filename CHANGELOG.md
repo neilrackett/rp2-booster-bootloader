@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.5.0 (unreleased)
+
+_In development. Sections below are filled in as epics land and finalised at tag time._
+
+### New features
+- **News in the web interface menu.** The menu at the top of the Apps, Network and Config pages now ends with **News**, to the right of **Report Issue**. It opens the [SidecarTridge news channel on Telegram](https://t.me/s/sidecartridgenews) in a new tab.
+
+---
+
 ## v2.4.2 (2026-09-30) - release
 
 Firmware only. The `.wificonf` file on the microSD card can now set a static IP address, and it is applied at every boot, so it can also change the network settings of a device that is already set up. For microfirmware developers, launching the DEV APP works again with a debug probe, and new buttons restore it from a clean slate or reset only its settings.

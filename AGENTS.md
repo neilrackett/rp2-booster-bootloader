@@ -158,6 +158,26 @@ Protocol parsing/lookup may happen in an interrupt context, but command handling
 * Follow `.clang-format` and `.clang-tidy` configurations in the repo root.
 * If you touch C/C++ files, format them and avoid introducing new clang-tidy warnings.
 
+### Release workflow
+
+- **A version starts with a release branch.** Create `release/vX.Y.Z` from `main`, where `vX.Y.Z`
+  is exactly what `version.txt` will contain for that release.
+- **One branch per epic, cut from the release branch**, named `epic/NN-<slug>`. All work for the
+  epic is committed there, including the `version.txt` bump in the first epic of a release.
+- **An epic's pull request targets `release/vX.Y.Z`, never `main`.** It is merged only after
+  Diego has verified the epic on real hardware.
+- **`main` receives the release branch once**, when the whole version is done and verified. Only
+  then is the tag pushed (`make tag`), which triggers the release workflow.
+- **Nothing committed or pushed may name an epic, story, iteration, decision (`D-NN`), constraint (`C-NN`) or the
+  `docs/epics/` folder**: code comments, documentation, changelog, README, commit messages, PR
+  descriptions. Epic branch names (`epic/NN-<slug>`) are the one exception. `docs/epics/` is
+  gitignored, so a planning identifier tells a reader of the repository nothing and cannot be
+  looked up. Write what the code does and why instead. Record the implementing commit hashes in
+  the story's notes. Release check:
+  `git grep -nIiE "EPIC-|STORY-|docs/epics|\b[CD]-[0-9]{2}\b" -- ':!CLAUDE.md' ':!AGENTS.md' ':!.gitignore'`
+  comes back empty.
+- Commit, push, open and merge pull requests only when Diego asks.
+
 ### Submodules
 
 Do not change submodule pins unless the change is explicitly required. If you do, call it out clearly in the PR/commit message and note compatibility risk.

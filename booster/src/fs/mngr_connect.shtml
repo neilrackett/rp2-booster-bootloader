@@ -152,6 +152,10 @@
           <a href="https://docs.sidecartridge.com/sidecartridge-multidevice/issues" target="_blank"
             class="pure-menu-link">Report Issue</a>
         </li>
+        <li class="pure-menu-item">
+          <a href="https://t.me/s/sidecartridgenews" target="_blank"
+            class="pure-menu-link">News</a>
+        </li>
       </ul>
     </div>
   </nav>
