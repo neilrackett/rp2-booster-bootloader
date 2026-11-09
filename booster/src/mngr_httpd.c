@@ -281,6 +281,13 @@ static const char *cgi_test(int iIndex, int iNumParams, char *pcParam[],
 const char *cgi_download(int iIndex, int iNumParams, char *pcParam[],
                          char *pcValue[]) {
   DPRINTF("cgi_download called with index %d\n", iIndex);
+  // One download at a time: a second one would rebuild the HTTP request and
+  // reopen the file while lwIP still writes the first (two tabs, a double
+  // click).
+  if (appmngr_download_in_flight()) {
+    return mngr_httpd_refuse("Another download is in progress",
+                             DOWNLOAD_BUSY_ERROR);
+  }
   const char *json = cgiparam_get("json", iNumParams, pcParam, pcValue);
   if (json == NULL) {
     DPRINTF("No app to download: the json parameter is missing\n");
@@ -697,6 +704,12 @@ const char *cgi_factoryreset(int iIndex, int iNumParams, char *pcParam[],
 const char *cgi_firmware_upgrade_start(int iIndex, int iNumParams,
                                        char *pcParam[], char *pcValue[]) {
   DPRINTF("cgi_firmware_upgrade_start called with index %d\n", iIndex);
+  if (appmngr_download_in_flight()) {
+    response_status = MNGR_HTTPD_RESPONSE_BAD_REQUEST;
+    snprintf(httpd_response_message, sizeof(httpd_response_message),
+             "Another download is in progress");
+    return "/response.shtml";
+  }
   mngr_firmwareUpgradeStart();
   response_status = MNGR_HTTPD_RESPONSE_OK;
   snprintf(httpd_response_message, sizeof(httpd_response_message), "");
@@ -750,6 +763,10 @@ const char *cgi_download_retry(int iIndex, int iNumParams, char *pcParam[],
   LWIP_UNUSED_ARG(pcParam);
   LWIP_UNUSED_ARG(pcValue);
   DPRINTF("cgi_download_retry called\n");
+  if (appmngr_download_in_flight()) {
+    return mngr_httpd_refuse("Another download is in progress",
+                             DOWNLOAD_BUSY_ERROR);
+  }
   appmngr_set_download_phase(APPMNGR_PHASE_CONNECT);
   appmngr_download_error(DOWNLOAD_OK);
   appmngr_set_download_phase(APPMNGR_PHASE_CONNECT);
@@ -765,6 +782,12 @@ const char *cgi_download_cancel(int iIndex, int iNumParams, char *pcParam[],
   LWIP_UNUSED_ARG(pcParam);
   LWIP_UNUSED_ARG(pcValue);
   DPRINTF("cgi_download_cancel called\n");
+  // Cancel clears a failed download. A live one keeps its file: closing it
+  // under lwIP's receive callback would corrupt the card.
+  if (appmngr_download_in_flight()) {
+    return mngr_httpd_refuse("Another download is in progress",
+                             DOWNLOAD_BUSY_ERROR);
+  }
   appmngr_cleanup_download();
   appmngr_set_download_phase(APPMNGR_PHASE_IDLE);
   appmngr_download_status(DOWNLOAD_STATUS_IDLE);

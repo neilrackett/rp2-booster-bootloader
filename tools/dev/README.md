@@ -18,6 +18,7 @@ console.
 | `swd.py` | Reads and drives the running RP: `running`, `verify`, `build-id`, `read`, `program`, `reset`, `resume`, `heap`, `crash`, `postmortem`, `screen`, `text`, `select`, and in debug builds `key`, `inject` and `bus`. `python3 tools/dev/swd.py --help` and the top of the file explain each. |
 | `console.py` | Captures the debug console (debug builds only, 921,600 baud) to `logs/console.log`: `watch` in one terminal, then `tail`, `since-boot`, `grep` and `wait` from anywhere. |
 | `testserver.py` | Catalogs and downloads over HTTP and HTTPS with every failure Booster must survive: errors, truncation, stalls, redirect loops, slow downloads, a wrong MD5, and `many-N` catalogs of N apps. |
+| `dnsredirect.py` | A DNS server that answers chosen host names with this machine's address and forwards every other query. Pointed at it, a released firmware reaches `testserver.py` under its real update host. |
 | `stackdepth.py` | Worst-case stack depth from GCC's call graph (`.ci` files from `measure_builds.sh`). |
 | `measure_builds.sh` | Out-of-tree MinSizeRel builds, release and debug, with section sizes, the flash report, the heap size and the call-graph files. |
 
@@ -32,6 +33,42 @@ python3 tools/dev/swd.py postmortem      # if it hangs: both cores' backtraces
 
 Build output, cached ELFs (`builds/elf/<type>-<build id>.elf`, which `swd.py` matches against the
 device's build ID) and logs stay out of git.
+
+## Testing a firmware upgrade end to end
+
+A released Booster fetches its update from `atarist.sidecartridge.com` over HTTPS, and does not
+verify the certificate. Answer that name with the Mac's address and serve the new release from
+the Mac, and any published version takes the same path a device in the field takes, with its
+own download code and its own upgrader, before anything is published:
+
+1. **Start from the version to upgrade from.** To go back to the published release, open
+   `http://<device>/mngr_upgrade.shtml` directly (no banner appears for an older version) and
+   upgrade: the device downloads it from the real CDN. Or flash its full image by drag-and-drop.
+2. **Serve the new release.** The root build (`./build.sh pico_w release final`) leaves
+   `SIDECARTVERSION`, `upgrade.bin` and `upgrade.md5` in `dist/`. Copy the three into a folder
+   and serve it on ports 80 and 443:
+   `python3 tools/dev/testserver.py --root <folder> --ecdsa-port 0`.
+3. **Redirect the update host.**
+   `python3 tools/dev/dnsredirect.py --name atarist.sidecartridge.com` answers it with the Mac's
+   address and forwards every other name, so catalogs and the rest keep working.
+4. **Point the device's DNS at the Mac.** The device asks the DNS server of its network
+   settings, not the Mac's hosts file. In `.wificonf` on the card (or on the Network page when
+   there is no `.wificonf`), set a static configuration whose DNS is the Mac:
+
+   ```
+   TCPIP_DHCP=No
+   TCPIP_ADDRESS=<the device's address>
+   TCPIP_NETMASK=255.255.255.0
+   TCPIP_GATEWAY=<the router>
+   TCPIP_DNS=<the Mac's address>
+   ```
+
+   and power-cycle. The redirector prints each query: the device's request for the update host
+   shows as "redirected".
+5. **Upgrade.** The "Firmware update available" banner shows the served version; the Upgrade
+   page downloads and installs it. `swd.py verify` and `build-id` against the build's
+   `booster/build/booster.elf` confirm what runs.
+6. **Undo step 4** (`TCPIP_DHCP=Yes`, or remove the block) and power-cycle.
 
 ## Rules
 

@@ -199,6 +199,11 @@ typedef enum {
   DOWNLOAD_HTTP_ERROR,
   // Appended, not inserted: these values surface in the UI and in logs.
   DOWNLOAD_MD5UNAVAILABLE_ERROR,
+  // The server sent the file with Transfer-Encoding: chunked, whose framing
+  // would be written into the file.
+  DOWNLOAD_CHUNKED_ERROR,
+  // Another download is still in flight.
+  DOWNLOAD_BUSY_ERROR,
 } download_err_t;
 
 typedef enum {
@@ -237,6 +242,15 @@ typedef enum {
 
 sdcard_info_t *appmngr_get_sdcard_info();
 app_info_t *appmngr_get_app_info();
+
+/**
+ * @brief Is a download, of an app or of the firmware, still in flight?
+ *
+ * Both share one HTTP request and one temporary file: a second download, a
+ * retry or a cancel while this is true would rebuild the request or close the
+ * file under lwIP's callbacks.
+ */
+bool appmngr_download_in_flight(void);
 
 download_err_t appmngr_save_app_info(const char *json_str);
 
