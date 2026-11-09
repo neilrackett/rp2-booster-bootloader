@@ -1,6 +1,8 @@
 #include "include/network.h"
 
 static bool cyw43Initialized = false;
+
+bool network_isInitialized(void) { return cyw43Initialized; }
 static wifi_mode_t wifiCurrentMode = WIFI_MODE_STA;
 static wifi_network_info_t wifiNetworkInfo = {0};
 static wifi_scan_data_t wifiScanData = {0};

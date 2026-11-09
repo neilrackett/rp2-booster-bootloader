@@ -328,34 +328,19 @@ static void dhcp_server_process(void *arg, struct udp_pcb *upcb, struct pbuf *p,
     // Set the total length
     *len_ptr = (uint8_t)total_len;
 
-    // Define the captive portal URI
+    // Tell clients where the setup page is (DHCP option 114). The web server
+    // here is plain HTTP, so the address has to say so: a client that honours
+    // an https:// one would be sent to a port nobody answers.
     char ip_str[IP4ADDR_STRLEN_MAX];
     if (ip4addr_ntoa_r(&d->ip, ip_str, sizeof(ip_str)) == NULL) {
-        // Handle error: conversion failed
-        DPRINTF("Failed to convert IP address to string.\n");
-        return;
+      DPRINTF("Failed to convert IP address to string.\n");
+      goto ignore_request;
     }
-    const char *scheme = "https://";
-    size_t uri_len = strlen(scheme) + strlen(ip_str) + 1; // +1 for null terminator
-    char *captive_portal_uri = malloc(uri_len);
-    if (captive_portal_uri == NULL) {
-        DPRINTF("Memory allocation failed.\n");
-        return;
-    }
-
-    // Construct the full URI
-    snprintf(captive_portal_uri, uri_len, "%s%s", scheme, ip_str);
-    uint8_t captive_portal_option[2 + sizeof(captive_portal_uri) - 1];
-
-    // Set the option code (114) and length
-    captive_portal_option[0] = DHCP_CAPTIVE_PORTAL_URL; // Option code for Captive Portal
-    captive_portal_option[1] = sizeof(captive_portal_uri) - 1; // Length of the URI string
-
-    // Copy the URI into the option data
-    memcpy(&captive_portal_option[2], captive_portal_uri, sizeof(captive_portal_uri) - 1);
-
-    // Append the captive portal option to the DHCP options
-    opt_write_n(&opt, captive_portal_option[0], captive_portal_option[1], &captive_portal_option[2]);
+    char captive_portal_uri[sizeof("http://") + IP4ADDR_STRLEN_MAX];
+    int uri_len = snprintf(captive_portal_uri, sizeof(captive_portal_uri),
+                           "http://%s", ip_str);
+    opt_write_n(&opt, DHCP_CAPTIVE_PORTAL_URL, (size_t)uri_len,
+                captive_portal_uri);
     DPRINTF("DHCP Captive Portal Option: %s\n", captive_portal_uri);
 
     *opt++ = DHCP_OPT_END;

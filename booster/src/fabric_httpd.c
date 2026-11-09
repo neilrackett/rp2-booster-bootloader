@@ -355,23 +355,23 @@ err_t httpd_post_receive_data(void *connection, struct pbuf *p) {
         len_pass = p->tot_len - value_pass;
       }
       if ((len_pass > 0) && (len_pass < WIFI_PASS_BUFSIZE)) {
-        /* provide contiguous storage if p is a chained pbuf */
+        // Always a copy: the terminator below must not land in the pbuf, where
+        // it could fall one byte past a full segment.
         char buf_pass[WIFI_PASS_BUFSIZE];
-        char *rawPass = (char *)pbuf_get_contiguous(
-            p, buf_pass, sizeof(buf_pass), len_pass, value_pass);
-        rawPass[len_pass] = '\0';
-        DPRINTF("Password raw: %s\n", rawPass);
-        if (rawPass) {
-          bool valid = url_decode(rawPass, pass, len_pass + 1);
+        if (pbuf_copy_partial(p, buf_pass, len_pass, value_pass) == len_pass) {
+          buf_pass[len_pass] = '\0';
+          bool valid = url_decode(buf_pass, pass, len_pass + 1);
           DPRINTF("Bad encoding: %s\n", valid ? "No" : "Yes");
           valid_connection = connection;
           DPRINTF("Password: %u characters\n", (unsigned)strlen(pass));
         }
       }
     }
+    pbuf_free(p);  // lwIP leaves the received pbuf to this callback
     return ERR_OK;
   }
   DPRINTF("POST data received for invalid connection\n");
+  pbuf_free(p);
   return ERR_VAL;
 }
 
