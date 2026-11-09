@@ -8,6 +8,7 @@
 
 #include "urlparse.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -53,6 +54,21 @@ int urlparse_parse(const char *url, url_components_t *components) {
     if (parsed == 0 || parsed > UINT16_MAX) return -1;
     components->port = (uint16_t)parsed;
     *port_sep = '\0';
+  }
+  return 0;
+}
+
+int urlparse_addCacheBuster(const char *url, uint32_t token, char *out,
+                            size_t outSize) {
+  if (!out || outSize == 0) return -1;
+  out[0] = '\0';
+  if (!url) return -1;
+  char separator = strchr(url, '?') != NULL ? '&' : '?';
+  int written = snprintf(out, outSize, "%s%ccb=%08lx", url, separator,
+                         (unsigned long)token);
+  if (written < 0 || (size_t)written >= outSize) {
+    out[0] = '\0';
+    return -1;
   }
   return 0;
 }

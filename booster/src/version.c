@@ -2,6 +2,7 @@
 
 #include <ctype.h>
 
+#include "pico/rand.h"
 #include "urlparse.h"
 #include "vercmp.h"
 
@@ -237,7 +238,13 @@ void version_loop(void) {
   version_buf_used = 0;
   version_string[0] = '\0';
 
-  download_version_t start_status = version_start_download(VERSION_URL);
+  // A stale copy from the CDN would hide a release that exists.
+  static char fresh[URLPARSE_FRESH_URL_MAX];
+  download_version_t start_status =
+      version_start_download(urlparse_addCacheBuster(VERSION_URL, get_rand_32(),
+                                                     fresh, sizeof(fresh)) == 0
+                                 ? fresh
+                                 : VERSION_URL);
   if (start_status == DOWNLOAD_VERSION_DEFAULT ||
       start_status == DOWNLOAD_VERSION_CANNOTPARSEURL ||
       start_status == DOWNLOAD_VERSION_FAILED) {

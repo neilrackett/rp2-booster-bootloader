@@ -34,6 +34,7 @@ _In development. Sections below are filled in as epics land and finalised at tag
 - **A file sent in chunks is refused with that reason** instead of failing at the checksum.
 - **The setup network now gives phones the whole address of the setup page.** It sent only its first three letters.
 - **A crafted request during WiFi setup can no longer write past a network buffer.**
+- **A firmware update right after a release no longer fails on a stale copy.** The update check, the update file and its checksum could come from a cached copy of the previous release, so the device hid the update or refused it with a checksum error for hours. Each request now gets past the cache.
 - **Offline mode no longer freezes the device.** After three failed WiFi attempts the device stopped responding, the Atari screen stayed as it was, and holding SELECT did nothing.
 - **First-time WiFi setup no longer loses memory.** Each password sent during setup, and each address given out on the setup network, kept a little memory until the next restart. Enough attempts in one session could make setup stop responding.
 - **A typo in the static IP settings no longer takes the device off the network.** The Network page stored whatever was typed and the device applied it at the next boot. The address, netmask, gateway and DNS servers are now checked when you click **Save**: if one is not valid, the page names it and nothing is saved, not even the other fields. Valid values are stored in their clean form.

@@ -67,5 +67,31 @@ int main(void) {
   CHECK_EQ(urlparse_parse("http://host:abc/x", &c), -1);
   CHECK_EQ(urlparse_parse(NULL, &c), -1);
   CHECK_EQ(urlparse_parse("http://host/", NULL), -1);
+
+  // The cache-busting parameter of the firmware update requests.
+  char fresh[URLPARSE_FRESH_URL_MAX];
+  CHECK_EQ(urlparse_addCacheBuster("https://h/upgrade.bin", 0x1a2b3c4d, fresh,
+                                   sizeof(fresh)),
+           0);
+  CHECK(strcmp(fresh, "https://h/upgrade.bin?cb=1a2b3c4d") == 0);
+  CHECK_EQ(urlparse_addCacheBuster("https://h/x", 7, fresh, sizeof(fresh)), 0);
+  CHECK(strcmp(fresh, "https://h/x?cb=00000007") == 0);
+  CHECK_EQ(urlparse_addCacheBuster("https://h/x?a=1", 1, fresh, sizeof(fresh)),
+           0);
+  CHECK(strcmp(fresh, "https://h/x?a=1&cb=00000001") == 0);
+  // Survives the parser into the request line.
+  CHECK_EQ(urlparse_parse(fresh, &c), 0);
+  CHECK(strcmp(c.uri, "/x?a=1&cb=00000001") == 0);
+  // Exactly fitting, one byte short, and the arguments it must refuse.
+  char tight[24];
+  CHECK_EQ(urlparse_addCacheBuster("http://h/ab", 1, tight, sizeof(tight)), 0);
+  CHECK_EQ(strlen(tight), 23);
+  CHECK_EQ(urlparse_addCacheBuster("http://h/abc", 1, tight, sizeof(tight)),
+           -1);
+  CHECK_EQ(tight[0], '\0');
+  CHECK_EQ(urlparse_addCacheBuster(NULL, 1, fresh, sizeof(fresh)), -1);
+  CHECK_EQ(fresh[0], '\0');
+  CHECK_EQ(urlparse_addCacheBuster("http://h/", 1, NULL, 4), -1);
+  CHECK_EQ(urlparse_addCacheBuster("http://h/", 1, fresh, 0), -1);
   TEST_END();
 }
