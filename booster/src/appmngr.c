@@ -88,10 +88,22 @@ static absolute_time_t redirect_retry_time;
 // mutex the callbacks already run under, so main-loop filesystem sections
 // take it too; it is recursive, so a path reached from a callback (which
 // already holds it) is unaffected.
+//
+// Once a launch has stopped the network there is no worker left to exclude and
+// no async context to lock: its deinit zeroes it, and taking the lock would
+// call through a null pointer.
+static bool appmngr_network_stopped = false;
+
 static inline void appmngr_fs_lock(void) {
+  if (appmngr_network_stopped) {
+    return;
+  }
   async_context_acquire_lock_blocking(cyw43_arch_async_context());
 }
 static inline void appmngr_fs_unlock(void) {
+  if (appmngr_network_stopped) {
+    return;
+  }
   async_context_release_lock(cyw43_arch_async_context());
 }
 // The components of the request currently in flight, needed to resolve a
@@ -161,6 +173,7 @@ static void appmngr_prepare_launch_runtime(void) {
 
   // Tear down Wi-Fi/LWIP so background activity cannot race the launch copy.
   network_deInit();
+  appmngr_network_stopped = true;
 }
 
 void appmngr_set_download_update(bool update) { download_update = update; }
