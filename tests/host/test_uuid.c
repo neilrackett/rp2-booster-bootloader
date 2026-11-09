@@ -8,6 +8,14 @@
 #include "uuid.h"
 
 int main(void) {
+  // The whole string, for paths: nothing may follow the UUID.
+  CHECK_EQ(uuid_is_exact4("44444444-4444-4444-8444-444444444444"), 1);
+  CHECK_EQ(uuid_is_valid4("44444444-4444-4444-8444-444444444444/../../x"), 1);
+  CHECK_EQ(uuid_is_exact4("44444444-4444-4444-8444-444444444444/../../x"), 0);
+  CHECK_EQ(uuid_is_exact4("44444444-4444-4444-8444-4444444444441"), 0);
+  CHECK_EQ(uuid_is_exact4("../../../../../../../../../../../xyz"), 0);
+  CHECK_EQ(uuid_is_exact4(""), 0);
+  CHECK_EQ(uuid_is_exact4(NULL), 0);
   CHECK_EQ(uuid_is_valid4("44444444-4444-4444-8444-444444444444"), 1);
   CHECK_EQ(uuid_is_valid4("1805c20c-5b83-4ea1-9264-6fe13da448a0"), 1);
   CHECK_EQ(uuid_is_valid4("1805C20C-5B83-4EA1-B264-6FE13DA448A0"), 1);

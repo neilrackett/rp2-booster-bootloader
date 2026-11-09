@@ -9,6 +9,7 @@
 #include "uuid.h"
 
 #include <ctype.h>
+#include <stddef.h>
 
 // Helper function to check if a 36-character string is a valid UUID4.
 // A valid UUID4 is in the canonical format
@@ -41,4 +42,8 @@ int uuid_is_valid4(const char *uuid) {
     return 0;
   }
   return 1;
+}
+
+int uuid_is_exact4(const char *uuid) {
+  return uuid != NULL && uuid_is_valid4(uuid) && uuid[UUID_TEXT_LENGTH] == '\0';
 }

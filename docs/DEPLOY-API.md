@@ -67,6 +67,18 @@ microfirmware slot on the next launch.
 The upload replaces the previous one. There is no versioning and no undo. Reinstalling the
 DEV APP from the catalog keeps your upload.
 
+The HTTP status tells you whether the upload was saved, so `curl --fail` exits with an
+error whenever it was not:
+
+| Status | Meaning |
+| --- | --- |
+| 200 | Saved. The body is `{"status": 200, "message": "Uploaded"}` |
+| 400 | Refused before anything was written: the API is not enabled, another upload is in progress, or the file is larger than the microfirmware slot |
+| 500 | Not saved: the microSD card is missing, a write failed, or fewer bytes arrived than `Content-Length` announced. Your previous upload is kept |
+
+Before v2.5.0 a failed upload was also answered with status 200, so `curl --fail` could
+not tell it from a good one.
+
 ### Launch
 
 ```
@@ -77,8 +89,8 @@ GET /mngr_launchapp.cgi?uuid=44444444-4444-4444-8444-444444444444
 curl --fail "http://sidecart.local/mngr_launchapp.cgi?uuid=44444444-4444-4444-8444-444444444444"
 ```
 
-With an upload on the card, this programs it into the microfirmware slot and reboots into
-it. The device drops off the network while it does so. That is the microfirmware taking
+A request without a valid UUID is answered with status 400. With an upload on the card, this
+programs it into the microfirmware slot and reboots into it. The device drops off the network while it does so. That is the microfirmware taking
 over, not a failure.
 
 Without an upload, launching leaves the microfirmware slot untouched and boots whatever is
@@ -156,7 +168,7 @@ cheerfully launch a binary that never uploaded.
 | Upload refused, no banner on the web pages | The gate is shut. Check both conditions: DEV APP installed, Development channel selected |
 | Worked before, fails now | You almost certainly changed the release catalog. Switch it back |
 | Upload refused immediately on a large file | The `.uf2` is bigger than the microfirmware slot allows |
-| Upload appears to work, launch runs the old binary | The transfer was short and was rejected rather than committed. Check `curl` exited 0 |
+| Upload appears to work, launch runs the old binary | The transfer was short and was rejected rather than committed: `curl --fail` exits 22 on the 500 answer. Check its exit code |
 | Launch overwrites the microfirmware you flashed with the probe | An upload is still on the card, and it is flashed at every launch. Delete the DEV APP and install it again to remove it |
 | After updating Booster to v2.4.2, launch runs the old microfirmware instead of your upload | Uploads made with v2.3.0 to v2.4.1 were stored under the catalog binary's name, which is no longer flashed. Upload again |
 | Nothing responds at `sidecart.local` | mDNS. Use the IP address shown on the Atari screen |

@@ -8,7 +8,10 @@
 
 #include "mngr_httpd.h"
 
+#include "cgiparam.h"
 #include "devapi.h"
+#include "textescape.h"
+#include "uuid.h"
 
 #define WIFI_PASS_BUFSIZE 64
 static char *ssid = NULL;
@@ -229,6 +232,25 @@ static const char *ssi_tags[] = {
     "WIFICONF",  // 51 - /.wificonf on the SD card locks the Network page
 };
 
+void mngr_httpd_setResponse(mngr_httpd_response_status_t status,
+                            const char *message) {
+  response_status = status;
+  snprintf(httpd_response_message, sizeof(httpd_response_message), "%s",
+           message != NULL ? message : "");
+}
+
+// The answer to a request the Manager refuses: the reason and its code, shown
+// by 400_refused.shtml, with a 400 status so a script using curl --fail sees
+// the refusal. lwIP opens the page a handler returns exactly as
+// given, query included, so "/error.shtml?error=..." found no file and the
+// browser got no answer at all.
+static const char *mngr_httpd_refuse(const char *reason, int code) {
+  response_status = MNGR_HTTPD_RESPONSE_BAD_REQUEST;
+  snprintf(httpd_response_message, sizeof(httpd_response_message), "%s (%d)",
+           reason, code);
+  return "/400_refused.shtml";
+}
+
 /**
  * @brief
  *
@@ -259,53 +281,39 @@ static const char *cgi_test(int iIndex, int iNumParams, char *pcParam[],
 const char *cgi_download(int iIndex, int iNumParams, char *pcParam[],
                          char *pcValue[]) {
   DPRINTF("cgi_download called with index %d\n", iIndex);
-  bool update = false;
-  for (size_t i = 0; i < iNumParams; i++) {
-    /* check if parameter is "update" */
-    if (strcmp(pcParam[i], "update") == 0) {
-      DPRINTF("Update flag found, value: %s\n", pcValue[i]);
-      if (starts_with_case_insensitive(pcValue[i], "YyTt")) {
-        update = true;
-      } else {
-        update = false;
-      }
-      DPRINTF("Update flag set to: %d\n", update);
-    }
+  const char *json = cgiparam_get("json", iNumParams, pcParam, pcValue);
+  if (json == NULL) {
+    DPRINTF("No app to download: the json parameter is missing\n");
+    return mngr_httpd_refuse("No app to install", DOWNLOAD_PARSEJSON_ERROR);
   }
+  const char *update_value =
+      cgiparam_get("update", iNumParams, pcParam, pcValue);
+  bool update = update_value != NULL &&
+                starts_with_case_insensitive(update_value, "YyTt");
+  DPRINTF("Update flag set to: %d\n", update);
   appmngr_set_download_update(update);
-  for (size_t i = 0; i < iNumParams; i++) {
-    /* check if parameter is "json" */
-    if (strcmp(pcParam[i], "json") == 0) {
-      DPRINTF("JSON encoded value: %s\n", pcValue[i]);
-      int ret;
-      size_t len = 0;
-      char output_buffer[4096];
-      ret = mngr_httpd_base64_decode(
-          (unsigned char *)output_buffer, sizeof(output_buffer) - 1, &len,
-          (const unsigned char *)pcValue[i], strlen(pcValue[i]));
-      // Place a null terminator at the end of the string
-      output_buffer[len] = '\0';
-      if (ret != 0) {
-        DPRINTF("Error decoding base64: %d\n", ret);
-        static char error_url[64];  // Static buffer for the error URL
-        snprintf(error_url, sizeof(error_url),
-                 "/error.shtml?error=%d&error_msg=Decoding%20error", ret);
-        return error_url;
-      }
-      DPRINTF("Decoded value: %s\n", output_buffer);
-      download_err_t err = appmngr_save_app_info(output_buffer);
-      if (err != DOWNLOAD_OK) {
-        DPRINTF("Error saving app info: %d\n", err);
-        static char error_url[64];  // Static buffer for the error URL
-        snprintf(error_url, sizeof(error_url),
-                 "/error.shtml?error=%d&error_msg=Downloading%20error", err);
-        return error_url;
-      }
-      DPRINTF("App info saved\n");
-      appmngr_download_status(DOWNLOAD_STATUS_REQUESTED);
-      return "/downloading.shtml";
-    }
+
+  DPRINTF("JSON encoded value: %s\n", json);
+  size_t len = 0;
+  char output_buffer[4096];
+  int ret = mngr_httpd_base64_decode((unsigned char *)output_buffer,
+                                     sizeof(output_buffer) - 1, &len,
+                                     (const unsigned char *)json, strlen(json));
+  // Place a null terminator at the end of the string
+  output_buffer[len] = '\0';
+  if (ret != 0) {
+    DPRINTF("Error decoding base64: %d\n", ret);
+    return mngr_httpd_refuse("Decoding error", ret);
   }
+  DPRINTF("Decoded value: %s\n", output_buffer);
+  download_err_t err = appmngr_save_app_info(output_buffer);
+  if (err != DOWNLOAD_OK) {
+    DPRINTF("Error saving app info: %d\n", err);
+    return mngr_httpd_refuse("Downloading error", err);
+  }
+  DPRINTF("App info saved\n");
+  appmngr_download_status(DOWNLOAD_STATUS_REQUESTED);
+  return "/downloading.shtml";
 }
 
 // True while /.wificonf is on the card. The file re-applies the WiFi network
@@ -346,8 +354,8 @@ const char *cgi_saveparams(int iIndex, int iNumParams, char *pcParam[],
                            char *pcValue[]) {
   DPRINTF("cgi_saveparams called with index %d\n", iIndex);
   for (size_t i = 0; i < iNumParams; i++) {
-    /* check if parameter is "json" */
-    if (strcmp(pcParam[i], "json") == 0) {
+    /* check if parameter is "json"; "?json" without a value is no json */
+    if (strcmp(pcParam[i], "json") == 0 && pcValue[i] != NULL) {
       DPRINTF("JSON encoded value: %s\n", pcValue[i]);
       int ret;
       size_t len = 0;
@@ -526,23 +534,17 @@ static const char *cgi_fsnext(int iIndex, int iNumParams, char *pcParam[],
 const char *cgi_deleteapp(int iIndex, int iNumParams, char *pcParam[],
                           char *pcValue[]) {
   DPRINTF("cgi_deleteapp called with index %d\n", iIndex);
-  download_delete_err_t err = DOWNLOAD_DELETEAPP_OK;
-  for (size_t i = 0; i < iNumParams; i++) {
-    /* check if parameter is "json" */
-    if (strcmp(pcParam[i], "uuid") == 0) {
-      DPRINTF("APP to delete with UUID: %s\n", pcValue[i]);
-      err = appmngr_delete_app(pcValue[i]);
-      if (err == DOWNLOAD_DELETEAPP_OK) {
-        DPRINTF("App deleted\n");
-        return "/deleting.shtml";
-      }
+  download_delete_err_t err = DOWNLOAD_DELETEAPP_NOTUUID_ERROR;
+  const char *uuid = cgiparam_get("uuid", iNumParams, pcParam, pcValue);
+  if (uuid != NULL) {
+    DPRINTF("APP to delete with UUID: %s\n", uuid);
+    err = appmngr_delete_app(uuid);
+    if (err == DOWNLOAD_DELETEAPP_OK) {
+      DPRINTF("App deleted\n");
+      return "/deleting.shtml";
     }
   }
-  // Use err code 0 for generic error
-  static char error_url[128];  // Static buffer for the error URL
-  snprintf(error_url, sizeof(error_url),
-           "/error.shtml?error=%d&error_msg=Deleting%20error", err);
-  return error_url;
+  return mngr_httpd_refuse("Deleting error", err);
 }
 
 /**
@@ -558,20 +560,13 @@ const char *cgi_deleteapp(int iIndex, int iNumParams, char *pcParam[],
 const char *cgi_launchapp(int iIndex, int iNumParams, char *pcParam[],
                           char *pcValue[]) {
   DPRINTF("cgi_launchapp called with index %d\n", iIndex);
-  download_launch_err_t err = DOWNLOAD_LAUNCHAPP_OK;
-  for (size_t i = 0; i < iNumParams; i++) {
-    /* check if parameter is "json" */
-    if (strcmp(pcParam[i], "uuid") == 0) {
-      DPRINTF("APP to launch with UUID: %s\n", pcValue[i]);
-      appmngr_schedule_launch_app(pcValue[i]);
-      return "/launching.html";
-    }
+  const char *uuid = cgiparam_get("uuid", iNumParams, pcParam, pcValue);
+  if (uuid_is_exact4(uuid)) {
+    DPRINTF("APP to launch with UUID: %s\n", uuid);
+    appmngr_schedule_launch_app(uuid);
+    return "/launching.html";
   }
-  // Use err code 0 for generic error
-  static char error_url[128];  // Static buffer for the error URL
-  snprintf(error_url, sizeof(error_url),
-           "/error.shtml?error=%d&error_msg=Deleting%20error", err);
-  return error_url;
+  return mngr_httpd_refuse("Launching error", DOWNLOAD_LAUNCHAPP_NOTUUID_ERROR);
 }
 
 /**
@@ -589,44 +584,30 @@ const char *cgi_launchapp(int iIndex, int iNumParams, char *pcParam[],
 const char *cgi_restoreapp(int iIndex, int iNumParams, char *pcParam[],
                            char *pcValue[]) {
   DPRINTF("cgi_restoreapp called with index %d\n", iIndex);
-  enum { RESTORE_ERROR_URL_SIZE = 160 };
-  static char error_url[RESTORE_ERROR_URL_SIZE];
-  for (int i = 0; i < iNumParams; i++) {
-    if (strcmp(pcParam[i], "uuid") != 0) {
-      continue;
-    }
-    if (strcmp(pcValue[i], DEVAPI_DEV_APP_UUID) != 0) {
-      DPRINTF("Restore refused for %s: not the development app\n", pcValue[i]);
-      snprintf(error_url, sizeof(error_url),
-               "/error.shtml?error=%d&error_msg=Only%%20the%%20DEV%%20APP%%20"
-               "can%%20be%%20restored",
-               DOWNLOAD_LAUNCHAPP_NOTUUID_ERROR);
-      return error_url;
+  const char *uuid = cgiparam_get("uuid", iNumParams, pcParam, pcValue);
+  if (uuid != NULL) {
+    if (strcmp(uuid, DEVAPI_DEV_APP_UUID) != 0) {
+      DPRINTF("Restore refused for %s: not the development app\n", uuid);
+      return mngr_httpd_refuse("Only the DEV APP can be restored",
+                               DOWNLOAD_LAUNCHAPP_NOTUUID_ERROR);
     }
     if (!appmngr_get_sdcard_info()->ready) {
       DPRINTF("Restore refused: SD card not ready\n");
-      snprintf(error_url, sizeof(error_url),
-               "/error.shtml?error=%d&error_msg=SD%%20card%%20not%%20ready",
-               DOWNLOAD_LAUNCHAPP_SDCARDNOTREADY_ERROR);
-      return error_url;
+      return mngr_httpd_refuse("SD card not ready",
+                               DOWNLOAD_LAUNCHAPP_SDCARDNOTREADY_ERROR);
     }
     if (!devapi_hasCatalogBinary()) {
       // No launch error code describes this; 0 is the generic one, as in
       // cgi_launchapp. The message carries the meaning.
       DPRINTF("Restore refused: the DEV APP catalog binary is missing\n");
-      snprintf(error_url, sizeof(error_url),
-               "/error.shtml?error=0&error_msg=The%%20DEV%%20APP%%20binary%%20"
-               "is%%20missing.%%20Install%%20the%%20DEV%%20APP%%20again");
-      return error_url;
+      return mngr_httpd_refuse(
+          "The DEV APP binary is missing. Install the DEV APP again", 0);
     }
-    DPRINTF("Restore and launch scheduled for %s\n", pcValue[i]);
-    appmngr_schedule_restore_launch_app(pcValue[i]);
+    DPRINTF("Restore and launch scheduled for %s\n", uuid);
+    appmngr_schedule_restore_launch_app(uuid);
     return "/launching.html";
   }
-  snprintf(error_url, sizeof(error_url),
-           "/error.shtml?error=%d&error_msg=Missing%%20uuid",
-           DOWNLOAD_LAUNCHAPP_NOTUUID_ERROR);
-  return error_url;
+  return mngr_httpd_refuse("Missing uuid", DOWNLOAD_LAUNCHAPP_NOTUUID_ERROR);
 }
 
 /**
@@ -647,18 +628,15 @@ const char *cgi_restoreconfig(int iIndex, int iNumParams, char *pcParam[],
   response_status = MNGR_HTTPD_RESPONSE_BAD_REQUEST;
   snprintf(httpd_response_message, sizeof(httpd_response_message),
            "Missing uuid");
-  for (int i = 0; i < iNumParams; i++) {
-    if (strcmp(pcParam[i], "uuid") != 0) {
-      continue;
-    }
-    if (strcmp(pcValue[i], DEVAPI_DEV_APP_UUID) != 0) {
-      DPRINTF("Config restore refused for %s: not the development app\n",
-              pcValue[i]);
+  const char *uuid = cgiparam_get("uuid", iNumParams, pcParam, pcValue);
+  if (uuid != NULL) {
+    if (strcmp(uuid, DEVAPI_DEV_APP_UUID) != 0) {
+      DPRINTF("Config restore refused for %s: not the development app\n", uuid);
       snprintf(httpd_response_message, sizeof(httpd_response_message),
                "Only the DEV APP settings can be restored");
       return "/response.shtml";
     }
-    switch (appmngr_erase_app_config(pcValue[i])) {
+    switch (appmngr_erase_app_config(uuid)) {
       case APPMNGR_CONFIG_ERASED:
         response_status = MNGR_HTTPD_RESPONSE_OK;
         snprintf(httpd_response_message, sizeof(httpd_response_message),
@@ -927,7 +905,9 @@ static u16_t ssi_handler(int iIndex, char *pcInsert, int iInsertLen
       char *ssid =
           settings_find_entry(gconfig_getContext(), PARAM_WIFI_SSID)->value;
       if (ssid != NULL) {
-        printed = snprintf(pcInsert, iInsertLen, "%s", ssid);
+        // The name of the network the device joined, chosen by whoever runs
+        // it: text, not markup.
+        printed = (int)textescape_html(pcInsert, (size_t)iInsertLen, ssid);
       } else {
         printed =
             snprintf(pcInsert, iInsertLen,
@@ -1059,10 +1039,14 @@ static u16_t ssi_handler(int iIndex, char *pcInsert, int iInsertLen
           wifi_network_info_t *network = &networks->networks[current_tag_part];
           char last_char =
               (current_tag_part == networks->count - 1) ? ' ' : ',';
+          // Network names are whatever nearby access points broadcast: a
+          // quote in one would end its JSON string.
+          char ssid[sizeof(network->ssid) * 6 + 1];
+          textescape_js(ssid, sizeof(ssid), network->ssid);
           printed = snprintf(pcInsert, iInsertLen,
                              "{\"SSID\": \"%s\",\"BSSID\": \"%s\",\"RSSI\": "
                              "\"%d\",\"AUTH\": \"%d\"}%c",
-                             network->ssid, network->bssid, network->rssi,
+                             ssid, network->bssid, network->rssi,
                              network->auth_mode, last_char);
           *next_tag_part = current_tag_part + 1;
         } else {
@@ -1120,8 +1104,10 @@ static u16_t ssi_handler(int iIndex, char *pcInsert, int iInsertLen
     }
     case 17: /* APPSURL */
     {
-      printed = snprintf(
-          pcInsert, iInsertLen, "%s",
+      // Inserted into script strings and JSON: escaped so the URL cannot end
+      // the string it is in.
+      printed = (int)textescape_js(
+          pcInsert, (size_t)iInsertLen,
           settings_find_entry(gconfig_getContext(), PARAM_APPS_CATALOG_URL)
               ->value);
       break;
@@ -1294,8 +1280,11 @@ static u16_t ssi_handler(int iIndex, char *pcInsert, int iInsertLen
     }
     case 22: /* DLNAME - which app is installing */
     {
-      printed = snprintf(pcInsert, iInsertLen, "%.64s",
-                         appmngr_get_app_info()->name);
+      // The catalog's app name, inside a script string on downloading.shtml:
+      // escaped, or a name such as "Diego's Floppy" ends the string.
+      char name[65];
+      snprintf(name, sizeof(name), "%s", appmngr_get_app_info()->name);
+      printed = (int)textescape_js(pcInsert, (size_t)iInsertLen, name);
       break;
     }
     default: /* unknown tag */
