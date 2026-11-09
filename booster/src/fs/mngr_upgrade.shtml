@@ -130,9 +130,11 @@
             // Ignore any synchronous errors from fetch construction
           }
 
-          // Immediately show spinner for 20s, then redirect to root
+          // Immediately show spinner for 60s, then redirect to root: the
+          // install checks the whole file, writes and reads back about 2 MB,
+          // then Booster starts and joins the WiFi again.
           this.phase = 'confirming';
-          this.confirmSecondsRemaining = 20;
+          this.confirmSecondsRemaining = 60;
           if (this.confirmIntervalId) { clearInterval(this.confirmIntervalId); }
           this.confirmIntervalId = setInterval(() => {
             if (this.confirmSecondsRemaining > 0) this.confirmSecondsRemaining--;
@@ -140,7 +142,7 @@
           setTimeout(() => {
             if (this.confirmIntervalId) { clearInterval(this.confirmIntervalId); this.confirmIntervalId = null; }
             window.location.href = '/';
-          }, 20000);
+          }, 60000);
         }
       };
     }
@@ -197,9 +199,9 @@
       <button class="pure-button pure-button-primary" @click="confirmUpgrade()">Confirm firmware upgrade</button>
     </div>
 
-    <!-- Confirming / applying upgrade: 20s spinner then redirect to root -->
+    <!-- Confirming / applying upgrade: 60s spinner then redirect to root -->
     <div x-show="phase === 'confirming'">
-      <p>Applying firmware upgrade... The device may restart. Please wait.</p>
+      <p>Installing the new firmware. This takes about a minute, and the device restarts. Do not power off the device.</p>
       <div id="spinner" class="spinner">
         Upgrading... <span class="spinner-char">|</span>
         <span class="countdown">(<span x-text="confirmSecondsRemaining"></span> s)</span>

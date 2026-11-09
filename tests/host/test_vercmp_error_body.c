@@ -1,10 +1,9 @@
 // units: booster/src/vercmp.c
 /* The update check compares whatever body the version URL returned. A body
- * that is not a version string must never count as newer, but the first
- * numbers found anywhere are taken as the version: a "404: Not Found" page
- * is version 404.0.0, and every device shows the update banner for a release
- * that does not exist. The download path accepts any HTTP 200 body, so an
- * error page served with 200 by a CDN or a captive portal does this. */
+ * that is not a version string never counts as newer: taking the first
+ * numbers found anywhere made a "404: Not Found" page version 404.0.0, and an
+ * error page served with 200 by a CDN or a captive portal showed the update
+ * banner for a release that does not exist. */
 #include "test.h"
 #include "vercmp.h"
 

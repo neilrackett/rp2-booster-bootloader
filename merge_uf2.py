@@ -12,10 +12,11 @@ Combines two UF2 files so that:
    the first file and the start of the second file (if any).
 3. **All blocks from the second file** are copied after the gap.
 4. **Zero-filled UF2 blocks** are generated from the end of the second file up
-    to the end of the flash region used here (0x101E0000 inclusive).
-5. Block numbers are re-written so that every block from 0x10000000 to
-   0x101E0000 is represented and `blockNum` runs continuously from 0 to
-   *N - 1* with `numBlocks == N` for every block.
+    to the end of Booster's slot (0x101DFFFF, the last byte before the config
+    sectors at 0x101E0000).
+5. Block numbers are re-written so that every block from 0x10000000 up to
+   0x101E0000 (exclusive) is represented and `blockNum` runs continuously from
+   0 to *N - 1* with `numBlocks == N` for every block.
 
 Usage
 -----
@@ -24,7 +25,9 @@ Usage
 **Assumptions**
 * The first UF2 occupies a lower flash region than the second. If the two
   overlap or appear out of order, the script aborts with an error.
-* The board is RP2040-style with the region considered from 0x1000_0000 to 0x101E0000.
+* The board is RP2040-style with the region considered from 0x1000_0000 up to
+  0x101E_0000, exclusive: the per-app config sectors start there and the image
+  must never touch them.
 """
 
 # ────────── UF2 constants ──────────
@@ -37,7 +40,12 @@ UF2_MAGIC_START   = 0x0A324655
 UF2_MAGIC_END     = 0x0AB16F30  # Typical trailing marker
 
 FLASH_BASE_ADDR   = 0x10000000
-FLASH_END_ADDR    = 0x101E0000  # Inclusive end address for this build
+# Last byte of the image, inclusive: Booster's slot ends where the config
+# sectors start, at 0x101E0000. Treated as exclusive before, it added a block
+# with one byte at 0x101E0000: a drag-and-drop of the full image then never
+# completed (the bootrom ignores blocks that are not 256 bytes), and config
+# sector 0 was in the image.
+FLASH_END_ADDR    = 0x101DFFFF
 
 # ────────── UF2 block helper ──────────
 class UF2Block:
@@ -192,6 +200,13 @@ def main() -> None:
         combined.extend(tail_blocks)
     else:
         tail_blocks = []
+
+    # The config sectors, the lookup table and the global settings are the
+    # user's: nothing in the image may land there.
+    stray = [b for b in combined if b.end_addr() > FLASH_END_ADDR]
+    if stray:
+        sys.exit(f"{len(stray)} block(s) past 0x{FLASH_END_ADDR:08X}, "
+                 f"the first at 0x{stray[0].target_addr:08X}. Aborting.")
 
     # 7. Finalise headers (continuous numbering / total count)
     total_blocks = len(combined)
