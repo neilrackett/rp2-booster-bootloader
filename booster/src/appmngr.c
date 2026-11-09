@@ -1761,6 +1761,12 @@ done:
   return result;
 }
 
+_Static_assert(APP_FLASH_COPY_CHUNK_SIZE == UF2COPY_SECTOR_SIZE,
+               "the copy works in flash sectors");
+// Working space for the launch copy and for writing the upgrader. Static, not
+// malloc'd: see APP_FLASH_COPY_CHUNK_SIZE in appmngr.h.
+static uint8_t appmngr_sector_buf[APP_FLASH_COPY_CHUNK_SIZE];
+
 // FatFs and flash access for uf2copy_run(). Flash is out of XIP during an
 // erase or a program, so each runs with interrupts off.
 static int appmngr_uf2_read(void *ctx, uint8_t *buf, uint32_t len,
@@ -1798,11 +1804,6 @@ static void appmngr_uf2_program(void *ctx, uint32_t offset, const uint8_t *data,
 // cannot be opened (the slot is untouched), or DOWNLOAD_LAUNCHAPP_COPY_ERROR
 // when the copy stopped partway (the slot boots Booster).
 static download_launch_err_t appmngr_copy_app_to_slot(const char *filename) {
-  _Static_assert(APP_FLASH_COPY_CHUNK_SIZE == UF2COPY_SECTOR_SIZE,
-                 "the copy works in flash sectors");
-  // Static, not malloc'd: see APP_FLASH_COPY_CHUNK_SIZE in appmngr.h.
-  static uint8_t sectorBuf[APP_FLASH_COPY_CHUNK_SIZE];
-
   FIL file;
   FRESULT fres = f_open(&file, filename, FA_READ);
   if (fres != FR_OK) {
@@ -1822,8 +1823,8 @@ static download_launch_err_t appmngr_copy_app_to_slot(const char *filename) {
   uint32_t slotSize = (uint32_t)&__flash_binary_start - slotStart;
   DPRINTF("Copying %s into the slot, %lu bytes at 0x%08lX\n", filename,
           (unsigned long)slotSize, (unsigned long)slotStart);
-  uf2copy_result_t res =
-      uf2copy_run(&io, slotStart - XIP_BASE, slotSize, stub, sectorBuf);
+  uf2copy_result_t res = uf2copy_run(&io, slotStart - XIP_BASE, slotSize, stub,
+                                     appmngr_sector_buf);
   f_close(&file);
   if (res != UF2COPY_OK) {
     DPRINTF("Copy failed: %d\n", res);
@@ -2595,34 +2596,6 @@ download_err_t appmngr_finish_download_firmware() {
   return DOWNLOAD_OK;
 }
 
-static void __not_in_flash_func(program_image_from_flash_src)(
-    const uint8_t *src_flash, uint32_t image_size) {
-  const uint32_t SECTOR = FLASH_SECTOR_SIZE;
-  const uint32_t PAGE = FLASH_PAGE_SIZE;
-
-  uint32_t erase_size = (image_size + (SECTOR - 1)) & ~(SECTOR - 1);
-
-  multicore_lockout_victim_init();  // keep core 1 out (safe to call here if
-                                    // linked to RAM)
-  uint32_t ints = save_and_disable_interrupts();
-
-  flash_range_erase(0, erase_size);
-
-  uint8_t pagebuf[FLASH_PAGE_SIZE];
-  uint32_t wrote = 0;
-  while (wrote < image_size) {
-    uint32_t chunk = image_size - wrote;
-    if (chunk > PAGE) chunk = PAGE;
-    memset(pagebuf, 0xFF, PAGE);
-    memcpy(pagebuf, src_flash + wrote, chunk);
-    flash_range_program(wrote, pagebuf, PAGE);
-    wrote += chunk;
-  }
-
-  flash_flush_cache();
-  restore_interrupts(ints);
-}
-
 void appmngr_cleanup_upgrade_image(void) {
   SettingsConfigEntry *folder =
       settings_find_entry(gconfig_getContext(), PARAM_APPS_FOLDER);
@@ -2678,7 +2651,22 @@ void appmngr_firmwareUpgradeStart(void) {
   const uint32_t image_size =
       (uint32_t)upgrader_firmware_length * 2;  // in bytes
 
-  program_image_from_flash_src(src_flash, image_size);
+  // Stop core 1 for good: its SELECT loop runs from flash, which is out of
+  // XIP while the upgrader is written, and the device reboots right after.
+  select_coreWaitPushDisable();
+
+  // Into the slot in the launch copy's order: until the upgrader is complete,
+  // the slot boots this Booster.
+  uint8_t stub[UF2COPY_STUB_SIZE];
+  const uint8_t *booster = (const uint8_t *)&__flash_binary_start;
+  uf2copy_buildStub(stub, booster, booster + UF2COPY_BOOT2_SIZE);
+  uf2copy_io_t io = {NULL, NULL, NULL, appmngr_uf2_erase, appmngr_uf2_program};
+  if (uf2copy_writeImage(&io, (uint32_t)&_storage_flash_start - XIP_BASE,
+                         src_flash, image_size, stub,
+                         appmngr_sector_buf) != UF2COPY_OK) {
+    DPRINTF("Cannot write the upgrader\n");
+    reset_device();
+  }
 
   // UPGRADER Manager mode
   // Force to set the UPGRADER boot feature

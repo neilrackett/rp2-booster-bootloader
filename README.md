@@ -463,9 +463,9 @@ The **Upgrade view** installs a new version of the Booster firmware over WiFi. I
 The upgrade has two steps. Keep the page open and do not refresh it until it finishes.
 
 1. **Download.** Click **Continue upgrading**. The device downloads the checksum of the new firmware (`upgrade.md5`) and then the firmware itself (`upgrade.bin`) to the apps folder on the microSD card. A progress bar shows how much has arrived. When the download completes, the device checks the firmware against the checksum. This can take up to two minutes, depending on your network.
-2. **Install.** Click **Confirm firmware upgrade**. The device writes the new firmware to its flash memory and restarts. After 20 seconds the page reloads the web interface.
+2. **Install.** Click **Confirm firmware upgrade**. The device restarts into the installer, which checks the whole file on the microSD card, writes the new firmware to flash, reads it back, and starts it. This takes about a minute. After 60 seconds the page reloads the web interface.
 
-Do not power off the device while it installs.
+Do not power off the device while it installs. If the power is cut anyway, or the card cannot be read, power the device on again with the same card in: the installer starts over. A file that cannot be read in full is refused before anything is written, and the current firmware keeps running.
 
 The upgrade is refused, and nothing is written to flash, if the checksum file cannot be downloaded or read, or if the downloaded firmware does not match it. The page shows the reason, for example *Checksum mismatch: the download is corrupt or incomplete*, and a **Back to Home** button. The current firmware keeps running, so you can try again later.
 

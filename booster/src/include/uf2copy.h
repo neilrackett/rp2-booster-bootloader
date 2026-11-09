@@ -41,7 +41,9 @@ typedef enum {
   // The file holds no UF2 payload: the slot boots Booster.
   UF2COPY_ERR_EMPTY,
   // The app is larger than the slot: the slot boots Booster.
-  UF2COPY_ERR_TOO_BIG
+  UF2COPY_ERR_TOO_BIG,
+  // uf2copy_verifyRange(): flash differs from the file.
+  UF2COPY_ERR_VERIFY
 } uf2copy_result_t;
 
 typedef struct {
@@ -82,5 +84,67 @@ void uf2copy_buildStub(uint8_t *stub, const uint8_t *boot2,
  */
 uf2copy_result_t uf2copy_run(const uf2copy_io_t *io, uint32_t offset,
                              uint32_t size, const uint8_t *stub, uint8_t *buf);
+
+// The firmware upgrade works in parts of the file: the upgrader checks the
+// whole file before it erases anything, writes and verifies Booster's region,
+// and only then the start of the slot, where it runs from. These read the
+// file from its start each time; payload offsets count UF2 payload bytes,
+// which the image lays out from the start of flash.
+
+/**
+ * @brief Counts the UF2 payload bytes in the file, reading all of it.
+ *
+ * @return UF2COPY_OK with *total set, or UF2COPY_ERR_READ.
+ */
+uf2copy_result_t uf2copy_measure(const uf2copy_io_t *io, uint32_t *total);
+
+/**
+ * @brief Programs payload bytes [from, from + size) at offset, a sector at a
+ * time. The caller erases first; payload past the range is not read.
+ *
+ * @param offset A whole sector, from the start of flash.
+ * @param buf UF2COPY_SECTOR_SIZE bytes of working space.
+ * @param written Out: the payload bytes programmed, fewer than size when the
+ * file ends first.
+ * @return UF2COPY_OK or UF2COPY_ERR_READ.
+ */
+uf2copy_result_t uf2copy_writeRange(const uf2copy_io_t *io, uint32_t from,
+                                    uint32_t offset, uint32_t size,
+                                    uint8_t *buf, uint32_t *written);
+
+/**
+ * @brief Reads payload bytes [from, from + size) into buf, size at most a
+ * sector, so a sector can be read before it is erased.
+ *
+ * @param got Out: the bytes read, fewer than size when the file ends first.
+ * @return UF2COPY_OK or UF2COPY_ERR_READ.
+ */
+uf2copy_result_t uf2copy_readRange(const uf2copy_io_t *io, uint32_t from,
+                                   uint32_t size, uint8_t *buf, uint32_t *got);
+
+/**
+ * @brief Compares payload bytes [from, from + size) with flash.
+ *
+ * @param flash The flash those bytes were programmed to, readable.
+ * @return UF2COPY_OK, UF2COPY_ERR_VERIFY on a difference or a file that ends
+ * first, or UF2COPY_ERR_READ.
+ */
+uf2copy_result_t uf2copy_verifyRange(const uf2copy_io_t *io, uint32_t from,
+                                     const uint8_t *flash, uint32_t size,
+                                     uint8_t *buf);
+
+/**
+ * @brief Writes an image held in memory into the slot, in uf2copy_run()'s
+ * order: the stub first and the image's first sector last.
+ *
+ * @param offset Slot start, from the start of flash; a whole sector.
+ * @param image The image, size bytes.
+ * @param buf UF2COPY_SECTOR_SIZE bytes of working space, for the padded last
+ * sector.
+ * @return UF2COPY_OK, or UF2COPY_ERR_PARAM with nothing written.
+ */
+uf2copy_result_t uf2copy_writeImage(const uf2copy_io_t *io, uint32_t offset,
+                                    const uint8_t *image, uint32_t size,
+                                    const uint8_t *stub, uint8_t *buf);
 
 #endif  // UF2COPY_H

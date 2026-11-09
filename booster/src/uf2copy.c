@@ -157,3 +157,159 @@ uf2copy_result_t uf2copy_run(const uf2copy_io_t *io, uint32_t offset,
   io->program(io->ctx, offset, buf, padToPage(buf, filled));
   return UF2COPY_OK;
 }
+
+// Skips n payload bytes. Returns false on a read error; a file that ends first
+// leaves the reader at its end.
+static bool skipPayload(const uf2copy_io_t *io, uf2copy_reader_t *r,
+                        uint32_t n) {
+  while (n > 0) {
+    if (r->pos == r->len) {
+      if (r->eof) {
+        return true;
+      }
+      if (!nextBlock(io, r)) {
+        return false;
+      }
+      continue;
+    }
+    uint32_t step = r->len - r->pos;
+    if (step > n) {
+      step = n;
+    }
+    r->pos += step;
+    n -= step;
+  }
+  return true;
+}
+
+uf2copy_result_t uf2copy_measure(const uf2copy_io_t *io, uint32_t *total) {
+  *total = 0;
+  if (io->rewind(io->ctx) != 0) {
+    return UF2COPY_ERR_READ;
+  }
+  uf2copy_reader_t reader = {0};
+  for (;;) {
+    if (!nextBlock(io, &reader)) {
+      return UF2COPY_ERR_READ;
+    }
+    if (reader.eof) {
+      return UF2COPY_OK;
+    }
+    *total += reader.len - reader.pos;
+  }
+}
+
+uf2copy_result_t uf2copy_writeRange(const uf2copy_io_t *io, uint32_t from,
+                                    uint32_t offset, uint32_t size,
+                                    uint8_t *buf, uint32_t *written) {
+  *written = 0;
+  if (io->rewind(io->ctx) != 0) {
+    return UF2COPY_ERR_READ;
+  }
+  uf2copy_reader_t reader = {0};
+  if (!skipPayload(io, &reader, from)) {
+    return UF2COPY_ERR_READ;
+  }
+  while (*written < size) {
+    uint32_t filled = 0;
+    uf2copy_result_t res = fillSector(io, &reader, buf, &filled);
+    if (res != UF2COPY_OK) {
+      return res;
+    }
+    if (filled > size - *written) {
+      filled = size - *written;
+    }
+    if (filled == 0) {
+      break;
+    }
+    io->program(io->ctx, offset + *written, buf, padToPage(buf, filled));
+    *written += filled;
+    if (filled < UF2COPY_SECTOR_SIZE) {
+      break;
+    }
+  }
+  return UF2COPY_OK;
+}
+
+uf2copy_result_t uf2copy_readRange(const uf2copy_io_t *io, uint32_t from,
+                                   uint32_t size, uint8_t *buf, uint32_t *got) {
+  *got = 0;
+  if (size > UF2COPY_SECTOR_SIZE) {
+    return UF2COPY_ERR_PARAM;
+  }
+  if (io->rewind(io->ctx) != 0) {
+    return UF2COPY_ERR_READ;
+  }
+  uf2copy_reader_t reader = {0};
+  if (!skipPayload(io, &reader, from)) {
+    return UF2COPY_ERR_READ;
+  }
+  uf2copy_result_t res = fillSector(io, &reader, buf, got);
+  if (*got > size) {
+    *got = size;
+  }
+  return res;
+}
+
+uf2copy_result_t uf2copy_verifyRange(const uf2copy_io_t *io, uint32_t from,
+                                     const uint8_t *flash, uint32_t size,
+                                     uint8_t *buf) {
+  if (io->rewind(io->ctx) != 0) {
+    return UF2COPY_ERR_READ;
+  }
+  uf2copy_reader_t reader = {0};
+  if (!skipPayload(io, &reader, from)) {
+    return UF2COPY_ERR_READ;
+  }
+  uint32_t checked = 0;
+  while (checked < size) {
+    uint32_t filled = 0;
+    uf2copy_result_t res = fillSector(io, &reader, buf, &filled);
+    if (res != UF2COPY_OK) {
+      return res;
+    }
+    if (filled > size - checked) {
+      filled = size - checked;
+    }
+    if (filled == 0) {
+      return UF2COPY_ERR_VERIFY;  // the file ends before the range does
+    }
+    if (memcmp(buf, flash + checked, filled) != 0) {
+      return UF2COPY_ERR_VERIFY;
+    }
+    checked += filled;
+  }
+  return UF2COPY_OK;
+}
+
+uf2copy_result_t uf2copy_writeImage(const uf2copy_io_t *io, uint32_t offset,
+                                    const uint8_t *image, uint32_t size,
+                                    const uint8_t *stub, uint8_t *buf) {
+  if (io == NULL || image == NULL || stub == NULL || buf == NULL || size == 0 ||
+      (offset % UF2COPY_SECTOR_SIZE) != 0) {
+    return UF2COPY_ERR_PARAM;
+  }
+  uint32_t sectors = (size + UF2COPY_SECTOR_SIZE - 1) / UF2COPY_SECTOR_SIZE;
+
+  io->erase(io->ctx, offset, UF2COPY_SECTOR_SIZE);
+  io->program(io->ctx, offset, stub, UF2COPY_STUB_SIZE);
+  if (sectors > 1) {
+    io->erase(io->ctx, offset + UF2COPY_SECTOR_SIZE,
+              (sectors - 1) * UF2COPY_SECTOR_SIZE);
+  }
+  // Every sector but the first, then the first.
+  for (uint32_t k = 1; k <= sectors; k++) {
+    uint32_t sector = k % sectors;
+    if (sector == 0) {
+      io->erase(io->ctx, offset, UF2COPY_SECTOR_SIZE);
+    }
+    uint32_t at = sector * UF2COPY_SECTOR_SIZE;
+    uint32_t n = size - at;
+    if (n > UF2COPY_SECTOR_SIZE) {
+      n = UF2COPY_SECTOR_SIZE;
+    }
+    memcpy(buf, image + at, n);
+    io->program(io->ctx, offset + at, buf, padToPage(buf, n));
+  }
+  return UF2COPY_OK;
+}

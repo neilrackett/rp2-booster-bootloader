@@ -243,6 +243,125 @@ int main(void) {
   CHECK_EQ(uf2copy_run(&io, 0, 0, stub, workBuf), UF2COPY_ERR_PARAM);
   CHECK_EQ(f->ops, 0);
 
+  // The firmware upgrade's parts. A file of 2.5 sectors of payload.
+  payload = 2 * UF2COPY_SECTOR_SIZE + 2048;
+  file = makeUf2(payload, 256, &size);
+  memset(f, 0, sizeof(*f));
+  f->file = file;
+  f->fileSize = size;
+  uint32_t total = 0;
+  CHECK_EQ(uf2copy_measure(&io, &total), UF2COPY_OK);
+  CHECK_EQ(total, payload);
+  f->reads = 0;
+  f->failRead = 3;
+  CHECK_EQ(uf2copy_measure(&io, &total), UF2COPY_ERR_READ);
+  f->failRead = 0;
+  f->failRewind = true;
+  CHECK_EQ(uf2copy_measure(&io, &total), UF2COPY_ERR_READ);
+  f->failRewind = false;
+
+  // A range in the middle lands where it belongs and nowhere else.
+  memset(f->flash, 0xFF, sizeof(f->flash));
+  uint32_t written = 0;
+  CHECK_EQ(uf2copy_writeRange(&io, UF2COPY_SECTOR_SIZE, UF2COPY_SECTOR_SIZE,
+                              UF2COPY_SECTOR_SIZE, workBuf, &written),
+           UF2COPY_OK);
+  CHECK_EQ(written, UF2COPY_SECTOR_SIZE);
+  bool rangeOk = true;
+  for (uint32_t i = 0; i < SLOT_SIZE; i++) {
+    bool inRange = i >= UF2COPY_SECTOR_SIZE && i < 2 * UF2COPY_SECTOR_SIZE;
+    uint8_t want = inRange ? (uint8_t)(i * 13 + 1) : 0xFF;
+    if (f->flash[i] != want) rangeOk = false;
+  }
+  CHECK(rangeOk);
+  CHECK(!f->badArgs);
+  CHECK_EQ(uf2copy_verifyRange(&io, UF2COPY_SECTOR_SIZE,
+                               f->flash + UF2COPY_SECTOR_SIZE,
+                               UF2COPY_SECTOR_SIZE, workBuf),
+           UF2COPY_OK);
+  // A range that runs past the end of the file writes what there is.
+  CHECK_EQ(
+      uf2copy_writeRange(&io, 2 * UF2COPY_SECTOR_SIZE, 2 * UF2COPY_SECTOR_SIZE,
+                         SLOT_SIZE, workBuf, &written),
+      UF2COPY_OK);
+  CHECK_EQ(written, 2048);
+  CHECK(!f->badArgs);
+  // Verification catches a changed byte, a short file and a read error.
+  CHECK_EQ(uf2copy_verifyRange(&io, 0, f->flash, payload, workBuf),
+           UF2COPY_ERR_VERIFY);  // the first sector was never written
+  CHECK_EQ(uf2copy_verifyRange(&io, UF2COPY_SECTOR_SIZE,
+                               f->flash + UF2COPY_SECTOR_SIZE,
+                               payload - UF2COPY_SECTOR_SIZE, workBuf),
+           UF2COPY_OK);
+  f->flash[UF2COPY_SECTOR_SIZE + 100] ^= 1;
+  CHECK_EQ(uf2copy_verifyRange(&io, UF2COPY_SECTOR_SIZE,
+                               f->flash + UF2COPY_SECTOR_SIZE,
+                               UF2COPY_SECTOR_SIZE, workBuf),
+           UF2COPY_ERR_VERIFY);
+  f->flash[UF2COPY_SECTOR_SIZE + 100] ^= 1;
+  CHECK_EQ(
+      uf2copy_verifyRange(&io, UF2COPY_SECTOR_SIZE,
+                          f->flash + UF2COPY_SECTOR_SIZE, payload, workBuf),
+      UF2COPY_ERR_VERIFY);  // more than the file holds
+  f->reads = 0;
+  f->failRead = 2;
+  CHECK_EQ(uf2copy_verifyRange(&io, UF2COPY_SECTOR_SIZE,
+                               f->flash + UF2COPY_SECTOR_SIZE,
+                               UF2COPY_SECTOR_SIZE, workBuf),
+           UF2COPY_ERR_READ);
+  f->reads = 0;
+  f->failRead = 2;
+  CHECK_EQ(
+      uf2copy_writeRange(&io, 0, 0, UF2COPY_SECTOR_SIZE, workBuf, &written),
+      UF2COPY_ERR_READ);
+  // Reading a sector ahead of its erase.
+  f->failRead = 0;
+  uint32_t got = 0;
+  CHECK_EQ(uf2copy_readRange(&io, 300, UF2COPY_SECTOR_SIZE, workBuf, &got),
+           UF2COPY_OK);
+  CHECK_EQ(got, UF2COPY_SECTOR_SIZE);
+  CHECK_EQ(workBuf[0], (uint8_t)(300 * 13 + 1));
+  CHECK_EQ(workBuf[UF2COPY_SECTOR_SIZE - 1],
+           (uint8_t)((300 + UF2COPY_SECTOR_SIZE - 1) * 13 + 1));
+  CHECK_EQ(uf2copy_readRange(&io, payload - 10, 100, workBuf, &got),
+           UF2COPY_OK);
+  CHECK_EQ(got, 10);
+  CHECK_EQ(uf2copy_readRange(&io, 0, UF2COPY_SECTOR_SIZE + 1, workBuf, &got),
+           UF2COPY_ERR_PARAM);
+  f->reads = 0;
+  f->failRead = 1;
+  CHECK_EQ(uf2copy_readRange(&io, 0, UF2COPY_SECTOR_SIZE, workBuf, &got),
+           UF2COPY_ERR_READ);
+  free(file);
+
+  // An image in memory goes in like a copy: stub first, first sector last.
+  uint8_t *image = malloc(payload);
+  for (uint32_t i = 0; i < payload; i++) image[i] = (uint8_t)(i * 13 + 1);
+  memset(f, 0, sizeof(*f));
+  memset(f->flash, 0xFF, sizeof(f->flash));  // writeImage erases only its own
+  CHECK_EQ(uf2copy_writeImage(&io, 0, image, payload, stub, workBuf),
+           UF2COPY_OK);
+  CHECK(payloadAt(f, payload));
+  CHECK(!f->badArgs);
+  CHECK(!f->longBlankFirstSector);
+  CHECK_EQ(f->ops, 7);
+  CHECK(memcmp(f->op, "EPEPPEP", 7) == 0);
+  for (int i = 1; i < f->ops - 2; i++) CHECK(isStub(f->sector0[i]));
+  // One sector or less: no second erase.
+  memset(f, 0, sizeof(*f));
+  memset(f->flash, 0xFF, sizeof(f->flash));
+  CHECK_EQ(uf2copy_writeImage(&io, 0, image, 300, stub, workBuf), UF2COPY_OK);
+  CHECK(payloadAt(f, 300));
+  CHECK_EQ(f->ops, 4);
+  CHECK(memcmp(f->op, "EPEP", 4) == 0);
+  memset(f, 0, sizeof(*f));
+  CHECK_EQ(uf2copy_writeImage(&io, 100, image, 300, stub, workBuf),
+           UF2COPY_ERR_PARAM);
+  CHECK_EQ(uf2copy_writeImage(&io, 0, image, 0, stub, workBuf),
+           UF2COPY_ERR_PARAM);
+  CHECK_EQ(f->ops, 0);
+  free(image);
+
   free(f);
   TEST_END();
 }
