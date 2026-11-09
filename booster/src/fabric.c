@@ -123,7 +123,7 @@ int fabric_init() {
   }
 
   if (scardInitialized) {
-    // The .wificonf file, when present, is the configuration (EPIC-10). It
+    // The .wificonf file, when present, is the configuration. It
     // goes straight into the settings; Manager mode reads the same file on
     // its own boots, see mngr_init().
     wificonf_t wificonf;

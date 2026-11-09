@@ -18,7 +18,7 @@ static char pass[WIFI_PASS_BUFSIZE];
 static int auth = -1;
 static void *current_connection;
 static void *valid_connection;
-// Non-NULL while a developer .uf2 upload owns the POST body (EPIC-05).
+// Non-NULL while a developer .uf2 upload owns the POST body.
 static void *uploadConnection = NULL;
 // An upload whose body failed partway: its finish answers with an error.
 static void *uploadFailedConnection = NULL;
@@ -283,7 +283,7 @@ err_t httpd_post_begin(void *connection, const char *uri,
   LWIP_UNUSED_ARG(post_auto_wnd);
   DPRINTF("POST request for URI: %s\n", uri);
 
-  // Developer deploy API (EPIC-05). These POST callbacks are lwIP globals --
+  // Developer deploy API. These POST callbacks are lwIP globals --
   // one set for the whole binary -- so the manager-mode upload is dispatched
   // here alongside the fabric-mode password form. devapi_uploadBegin()
   // enforces the gate; nothing is written if it refuses.

@@ -3,7 +3,7 @@
  * Author: Diego Parrilla Santamaría
  * Date: September 2026
  * Copyright: 2026 - GOODDATA LABS SL
- * Description: The .wificonf file on the microSD card (EPIC-10, D-09)
+ * Description: The .wificonf file on the microSD card
  */
 
 #include "wificonf.h"
@@ -91,7 +91,7 @@ static void wificonf_noteChange(bool *changed, bool didChange) {
   }
 }
 
-// Apply the TCPIP_* block (D-09). No TCPIP_DHCP line: the stored setting
+// Apply the TCPIP_* block. No TCPIP_DHCP line: the stored setting
 // stands. TCPIP_DHCP on: stored as such, address lines ignored. TCPIP_DHCP
 // off: all or nothing. Address, netmask and gateway must all have parsed and
 // no TCPIP_* line may have failed, or the block is dropped and the stored

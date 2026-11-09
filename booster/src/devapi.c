@@ -3,7 +3,7 @@
  * Author: Diego Parrilla Santamaría
  * Date: July 2026
  * Copyright: 2026 - GOODDATA LABS SL
- * Description: Minimal deploy API for microfirmware developers (EPIC-05)
+ * Description: Minimal deploy API for microfirmware developers
  */
 
 #include "devapi.h"
@@ -44,8 +44,8 @@ static void devapi_buildDevAppPath(char *out, size_t outSize,
  * @brief Second half of the gate: the configured catalog is EXACTLY the
  * canonical development catalog.
  *
- * Exact comparison on purpose (D-06 uses the same rule for migration). No
- * trimming, no case folding, no ignoring a query string: "the Development
+ * Exact comparison on purpose (the catalog URL migration uses the same rule).
+ * No trimming, no case folding, no ignoring a query string: "the Development
  * channel is selected" has to mean one specific string, or it cannot be
  * described accurately in the developer docs.
  */
@@ -206,7 +206,7 @@ devapi_err_t devapi_uploadFinish(bool commit) {
   // Rename last. Until this succeeds the previous upload is untouched, so a
   // failed upload leaves it in place rather than a partial file. Same shape
   // as the firmware upgrade's tmp.download -> upgrade.uf2. The target is the
-  // upload file, never the catalog's <uuid>.uf2 (D-10).
+  // upload file, never the catalog's <uuid>.uf2.
   char finalPath[256] = {0};
   devapi_buildUploadPath(finalPath, sizeof(finalPath));
   f_unlink(finalPath);

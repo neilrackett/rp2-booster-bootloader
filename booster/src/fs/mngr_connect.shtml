@@ -32,7 +32,7 @@
         ssid: '',
         auth: '',
         authstring: '',
-        // /.wificonf re-applies the WiFi network at every boot (EPIC-10), so
+        // /.wificonf re-applies the WiFi network at every boot, so
         // connecting from here is refused while it is on the card.
         locked: '<!--#WIFICONF-->' === 'Yes',
 

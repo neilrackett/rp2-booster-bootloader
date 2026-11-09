@@ -122,7 +122,7 @@ int mngr_init() {
             appmngr_get_sdcard_info()->apps_folder_found ? "true" : "false");
   }
 
-  // Apply /.wificonf when the card carries one (EPIC-10). This runs before
+  // Apply /.wificonf when the card carries one. This runs before
   // WiFi starts, so the values take effect on this boot without a reboot,
   // and flash is written only when something changed, so a card that keeps
   // the file does not cost a flash write per boot.

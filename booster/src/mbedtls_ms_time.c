@@ -5,7 +5,7 @@
  * mbedTLS needs a monotonic millisecond clock; the SDK's altcp_tls_mbedtls.c
  * will not compile without MBEDTLS_HAVE_TIME. Time since boot is enough for
  * that purpose. This is NOT a wall clock -- certificate validity periods still
- * cannot be checked (constraint C-02, decision D-01).
+ * cannot be checked.
  */
 
 #include "mbedtls/platform_time.h"

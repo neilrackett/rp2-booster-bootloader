@@ -198,7 +198,7 @@ static const char *ssi_tags[] = {
     "APPSURL",   // 17 - Apps Catalog URL
     "NVERSION",  // 18 - New Version
     "NVERSTR",   // 19 - New Version String
-    "DEVMODE",   // 20 - Developer deploy API enabled (EPIC-05)
+    "DEVMODE",   // 20 - Developer deploy API enabled
     "DLSTAT",    // 21 - Download progress JSON (was PLHLDR12)
     "DLNAME",    // 22 - Name of the app being installed (was PLHLDR13)
     "PLHLDR14",  // 23 - Placeholder 14
@@ -324,7 +324,7 @@ const char *cgi_download(int iIndex, int iNumParams, char *pcParam[],
 }
 
 // True while /.wificonf is on the card. The file re-applies the WiFi network
-// and the TCP/IP settings at every boot (EPIC-10), so those are read-only on
+// and the TCP/IP settings at every boot, so those are read-only on
 // the Network page and their saves are refused in cgi_saveparams: a change
 // made here would only last until the next reboot.
 static bool mngr_httpd_wificonfLocks(void) {
@@ -661,7 +661,7 @@ const char *cgi_launchapp(int iIndex, int iNumParams, char *pcParam[],
 }
 
 /**
- * @brief "Restore and launch" the development app (EPIC-11).
+ * @brief "Restore and launch" the development app.
  *
  * Deletes the deploy API upload, erases the development app's config and
  * flashes the binary downloaded from the catalog, then launches it: a clean
@@ -702,7 +702,7 @@ const char *cgi_restoreapp(int iIndex, int iNumParams, char *pcParam[],
 }
 
 /**
- * @brief "Restore config only" for the development app (EPIC-11).
+ * @brief "Restore config only" for the development app.
  *
  * Erases the development app's config sector and nothing else: the
  * microfirmware in the slot and the deploy API upload stay, and nothing is

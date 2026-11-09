@@ -49,7 +49,7 @@
         restoreConfigOk: false,
         restoreConfigResult: '',
         // The development app's fixed UUID. Only its card offers "Restore and
-        // launch" (EPIC-11); the firmware refuses a restore for any other app.
+        // launch"; the firmware refuses a restore for any other app.
         devAppUuid: '44444444-4444-4444-8444-444444444444',
         // True only when Config has "Development - Local development only"
         // selected. Exact match, the same rule the firmware uses for the deploy
