@@ -156,6 +156,7 @@ static download_version_t version_start_download(const char *url) {
   request.url = request_uri_buf;
   request.complete = false;
 
+  request.callback_arg = &request;
   request.headers_fn = http_client_header_check_size_fn;
   request.recv_fn = http_client_receive_version_fn;
   request.result_fn = http_client_result_complete_fn;
@@ -224,6 +225,13 @@ static download_version_t version_finish_download(void) {
 }
 
 void version_loop(void) {
+  if (request.url != NULL && !request.complete) {
+    // A request that timed out is still owned by lwIP, which closes it on its
+    // own timeout and then calls back into it: it must not be reused yet.
+    DPRINTF("Previous version request still open\n");
+    status = DOWNLOAD_VERSION_FAILED;
+    return;
+  }
   status = DOWNLOAD_VERSION_IDLE;
   request = (HTTPC_REQUEST_T){0};
   version_buf_used = 0;
@@ -233,30 +241,41 @@ void version_loop(void) {
   if (start_status == DOWNLOAD_VERSION_DEFAULT ||
       start_status == DOWNLOAD_VERSION_CANNOTPARSEURL ||
       start_status == DOWNLOAD_VERSION_FAILED) {
+    request.complete = true;  // never sent: nothing will call back into it
     return;
   }
 
-  uint32_t waited_ms = 0;
+  // Real time: a poll pass can take much longer than its interval.
+  absolute_time_t deadline = make_timeout_time_ms(VERSION_DOWNLOAD_TIMEOUT_MS);
   while (version_poll_download() == DOWNLOAD_VERSION_POLL_CONTINUE) {
     if (status == DOWNLOAD_VERSION_FAILED) break;
-    waited_ms += VERSION_POLL_INTERVAL_MS;
-    if (waited_ms >= VERSION_DOWNLOAD_TIMEOUT_MS) {
-      DPRINTF("VERSION download timed out after %u ms\n", waited_ms);
+    if (absolute_time_diff_us(get_absolute_time(), deadline) < 0) {
+      DPRINTF("VERSION download timed out after %u ms\n",
+              (unsigned)VERSION_DOWNLOAD_TIMEOUT_MS);
       status = DOWNLOAD_VERSION_FAILED;
       break;
     }
   }
 
+  // The request is left as it is: if it timed out, lwIP still calls back
+  // into it until it closes the connection.
   (void)version_finish_download();
-  request = (HTTPC_REQUEST_T){0};
 }
 
 download_version_t version_get_status(void) { return status; }
 
+// The fetched body counts only when the request finished with a 200 and the
+// body is a version: an error page, a captive portal's login page or a body
+// cut short by the timeout never shows up as the latest version.
+static bool version_fetched(void) {
+  return status == DOWNLOAD_VERSION_COMPLETED &&
+         vercmp_isVersion(version_string);
+}
+
 const char *version_get_string(void) {
-  return (version_string[0] != '\0') ? version_string : RELEASE_VERSION;
+  return version_fetched() ? version_string : RELEASE_VERSION;
 }
 
 bool version_isNewer(void) {
-  return vercmp_isNewer(version_string, RELEASE_VERSION);
+  return version_fetched() && vercmp_isNewer(version_string, RELEASE_VERSION);
 }

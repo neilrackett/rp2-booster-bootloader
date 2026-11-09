@@ -53,6 +53,12 @@ static err_t internal_recv_fn(void *arg, struct altcp_pcb *conn, struct pbuf *p,
   if (req->recv_fn) {
     return req->recv_fn(req->callback_arg, conn, p, err);
   }
+  // Nobody wants the data: acknowledge and free it, or the pbufs leak and
+  // the receive window closes.
+  if (p != NULL) {
+    altcp_recved(conn, p->tot_len);
+    pbuf_free(p);
+  }
   return ERR_OK;
 }
 
