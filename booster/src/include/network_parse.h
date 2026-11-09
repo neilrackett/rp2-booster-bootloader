@@ -101,4 +101,25 @@ bool network_parseIPv4Netmask(const char* text, char* outNetmask);
  */
 bool network_parseDnsList(const char* text, char* outList);
 
+// A static TCP/IP configuration in canonical form.
+typedef struct {
+  char address[NETWORK_IPV4_STR_MAX];
+  char netmask[NETWORK_IPV4_STR_MAX];
+  char gateway[NETWORK_IPV4_STR_MAX];
+  char dns[NETWORK_DNS_LIST_STR_MAX];  // empty when none was given
+} network_static_config_t;
+
+/**
+ * @brief Checks a whole static TCP/IP configuration, with the rules the
+ * .wificonf file follows: address, netmask and gateway must all be valid, and
+ * the DNS list too unless it is empty or NULL.
+ *
+ * @param out Receives the canonical values; only complete on success.
+ * @return NULL if the configuration is valid, or the name of the first field
+ * that is not, for the error shown to the user.
+ */
+const char* network_checkStaticConfig(const char* address, const char* netmask,
+                                      const char* gateway, const char* dns,
+                                      network_static_config_t* out);
+
 #endif  // NETWORK_PARSE_H
