@@ -9,6 +9,8 @@
 #include "mngr.h"
 
 #include "devhooks.h"  // Debug-only SWD mailbox; include in this file only
+#include "pico/rand.h"
+#include "urlparse.h"
 
 // How long the Atari gets to see the reset command before the RP reboots.
 #define MNGR_ATARI_RESET_MS 1000
@@ -32,6 +34,17 @@ void mngr_enable_network_scan() { network_scan_enabled = true; }
 void mngr_disable_network_scan() { network_scan_enabled = false; }
 
 wifi_scan_data_t *mngr_get_networks() { return network_getFoundNetworks(); }
+
+// upgrade.bin and upgrade.md5 are replaced in place on every release, and the
+// CDN in front of them keeps the old upgrade.bin for hours. A parameter no
+// other request used gets past its cache, so the file and its checksum always
+// come from the same release.
+static const char *mngr_fresh_firmware_url(const char *url) {
+  static char fresh[URLPARSE_FRESH_URL_MAX];
+  return urlparse_addCacheBuster(url, get_rand_32(), fresh, sizeof(fresh)) == 0
+             ? fresh
+             : url;
+}
 
 static void mngr_enter_offline_mode(uint8_t wifi_status, const char *details,
                                     const char *mac_str) {
@@ -447,8 +460,8 @@ int mngr_init() {
         case DOWNLOAD_STATUS_NOT_STARTED: {
           if ((absolute_time_diff_us(get_absolute_time(), start_download_time) <
                0)) {
-            err = appmngr_start_download(
-                fw_fetching_md5 ? FIRMWARE_MD5_URL : FIRMWARE_BINARY_URL);
+            err = appmngr_start_download(mngr_fresh_firmware_url(
+                fw_fetching_md5 ? FIRMWARE_MD5_URL : FIRMWARE_BINARY_URL));
             if (err != DOWNLOAD_OK) {
               DPRINTF("Error downloading firmware. Drive to error page.\n");
               // As for a transfer that fails: the Upgrade page follows the

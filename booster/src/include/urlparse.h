@@ -9,7 +9,11 @@
 #ifndef URLPARSE_H
 #define URLPARSE_H
 
+#include <stddef.h>
 #include <stdint.h>
+
+// Room for a Booster OTA URL once urlparse_addCacheBuster() has extended it.
+#define URLPARSE_FRESH_URL_MAX 160
 
 typedef struct {
   char protocol[16];
@@ -36,5 +40,18 @@ typedef struct {
  * @return 0 on success, -1 on any error. components is zeroed first.
  */
 int urlparse_parse(const char *url, url_components_t *components);
+
+/**
+ * @brief Writes url to out with a "cb" query parameter holding token.
+ *
+ * A CDN caches by the whole URL, so a request with a parameter no other
+ * request used cannot be answered from its cache. Uses "&" if url already has
+ * a query.
+ *
+ * @return 0 on success, -1 if an argument is NULL or the result does not fit
+ * outSize. On failure out holds an empty string, if it has room for one.
+ */
+int urlparse_addCacheBuster(const char *url, uint32_t token, char *out,
+                            size_t outSize);
 
 #endif  // URLPARSE_H
