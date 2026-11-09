@@ -63,6 +63,11 @@ add_executable(${PROJECT_NAME}
         main.c
 )
 
+# A function that can end without returning its value is an error, not a
+# warning: a CGI handler that fell off its end handed lwIP whatever was in r0
+# as the page to send.
+target_compile_options(${PROJECT_NAME} PRIVATE -Werror=return-type)
+
 target_sources(${PROJECT_NAME} PRIVATE gconfig.c)
 target_sources(${PROJECT_NAME} PRIVATE aconfig.c)
 

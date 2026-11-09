@@ -456,6 +456,7 @@ int network_scan(absolute_time_t *wifiScanTime, int wifiScanInterval) {
   // else {
   //     DPRINTF("Scan already in progress\n");
   // }
+  return 0;
 }
 
 int network_scanIsActive() {
@@ -680,13 +681,14 @@ wifi_sta_conn_process_status_t network_wifiStaConnect() {
     DPRINTF(
         "No password found in config. Trying to connect without password\n");
   }
-  DPRINTF("The password is: %s\n",
-          passwordValue != NULL ? passwordValue : "<null>");
+  // The password itself never goes to the log, only its length: the debug
+  // console is captured to files.
+  DPRINTF("Password: %u characters\n",
+          passwordValue != NULL ? (unsigned)strlen(passwordValue) : 0U);
 
   uint32_t authValue = getAuthPicoCode(atoi(authMode->value));
   int errorCode = 0;
-  DPRINTF("Connecting to SSID=%s, password=%s, auth=%08x. ASYNC\n", ssid->value,
-          passwordValue != NULL ? passwordValue : "<null>", authValue);
+  DPRINTF("Connecting to SSID=%s, auth=%08x. ASYNC\n", ssid->value, authValue);
   errorCode =
       cyw43_arch_wifi_connect_async(ssid->value, passwordValue, authValue);
   if (errorCode != 0) {

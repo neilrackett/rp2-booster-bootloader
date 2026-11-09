@@ -159,6 +159,12 @@ add_subdirectory($ENV{FATFS_SDK_PATH}/src build)
 add_executable(${PROJECT_NAME} 
         main.c
 )
+
+# A function that can end without returning its value is an error, not a
+# warning: a CGI handler that fell off its end handed lwIP whatever was in r0
+# as the page to send.
+target_compile_options(${PROJECT_NAME} PRIVATE -Werror=return-type)
+
 add_dependencies(${PROJECT_NAME} generate_booster_fsdata)
 
 pico_generate_pio_header(${PROJECT_NAME} ${CMAKE_CURRENT_LIST_DIR}/romemul.pio)
@@ -166,6 +172,7 @@ pico_generate_pio_header(${PROJECT_NAME} ${CMAKE_CURRENT_LIST_DIR}/romemul.pio)
 target_sources(${PROJECT_NAME} PRIVATE
         appmngr.c
         blink.c
+        cgiparam.c
         devapi.c
         display.c
         display_fabric.c
@@ -188,6 +195,7 @@ target_sources(${PROJECT_NAME} PRIVATE
         sdcard.c
         select.c
         term.c
+        textescape.c
         uf2copy.c
         urlparse.c
         utc_time.c

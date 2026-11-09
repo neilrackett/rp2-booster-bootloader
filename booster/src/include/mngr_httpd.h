@@ -34,4 +34,11 @@ typedef enum {
 
 void mngr_httpd_start();
 
+/**
+ * @brief Sets the status and message /response.shtml reports. For answers
+ * produced outside this file's CGI handlers, such as the deploy API upload.
+ */
+void mngr_httpd_setResponse(mngr_httpd_response_status_t status,
+                            const char *message);
+
 #endif // MNGR_HTTPD_H

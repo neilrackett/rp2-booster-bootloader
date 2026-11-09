@@ -24,4 +24,14 @@
  */
 int uuid_is_valid4(const char *uuid);
 
+/**
+ * @brief Is the whole string a version 4 UUID, nothing before or after it?
+ *
+ * Use this for any UUID that goes into a file path: uuid_is_valid4() accepts
+ * "<uuid>/../../x", whose first 36 characters are a UUID.
+ *
+ * @return 1 if it is, 0 if not, or if uuid is NULL.
+ */
+int uuid_is_exact4(const char *uuid);
+
 #endif  // UUID_H

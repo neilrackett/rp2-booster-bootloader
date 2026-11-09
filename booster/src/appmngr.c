@@ -206,10 +206,16 @@ static download_err_t set_app_info(const char *json_str) {
   cJSON *md5 = cJSON_GetObjectItem(root, "md5");
   cJSON *version = cJSON_GetObjectItem(root, "version");
 
-  // For each field, confirm it's a string before copying
-  if (uuid && cJSON_IsString(uuid)) {
-    snprintf(app_info.uuid, sizeof(app_info.uuid), "%s", uuid->valuestring);
+  // The uuid names the app's files on the card, so it must be a UUID and
+  // nothing else; a catalog entry without one is refused.
+  if (!cJSON_IsString(uuid) || !uuid_is_exact4(uuid->valuestring)) {
+    DPRINTF("Missing or invalid uuid in the app info\n");
+    cJSON_Delete(root);
+    return DOWNLOAD_PARSEJSON_ERROR;
   }
+  snprintf(app_info.uuid, sizeof(app_info.uuid), "%s", uuid->valuestring);
+
+  // For each field, confirm it's a string before copying
   if (name && cJSON_IsString(name)) {
     snprintf(app_info.name, sizeof(app_info.name), "%s", name->valuestring);
   }
@@ -1860,8 +1866,10 @@ download_delete_err_t appmngr_delete_app(const char *uuid) {
   // Delete the app with the uuid given.
   DPRINTF("Deleting app with UUID: %s\n", uuid);
 
-  // First, check that the uuid is a valid uuid
-  if (strlen(uuid) != 36) {
+  // The whole string must be a UUID: it becomes a path, and with relative
+  // paths on, "../../x" or "<uuid>/../../x" would reach files outside the apps
+  // folder.
+  if (!uuid_is_exact4(uuid)) {
     DPRINTF("Invalid UUID: %s\n", uuid);
     return DOWNLOAD_DELETEAPP_NOTUUID_ERROR;
   }
@@ -2527,6 +2535,10 @@ download_err_t appmngr_confirm_download_app() {
   // First, get the uuid of the app
   char uuid[64] = {0};
   snprintf(uuid, sizeof(uuid), "%s", app_info.uuid);
+  if (!uuid_is_exact4(uuid)) {
+    DPRINTF("Invalid UUID: %s\n", uuid);
+    return DOWNLOAD_PARSEJSON_ERROR;
+  }
 
   // Get the filename of the app info json
   char json_filename[256] = {0};

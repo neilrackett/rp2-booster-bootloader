@@ -370,21 +370,23 @@
           return "";
         },
 
-        // Build the JSON payload posted to /download.cgi from the selected version,
-        // stripping client-only fields to keep the URL small.
+        // Build the JSON payload sent to /download.cgi from the selected version:
+        // only the fields Booster reads, without the description. It travels in
+        // the URL, and Booster's web server takes about 1 KB of request line once
+        // a request spans two TCP segments.
         buildDownloadPayload(app) {
           const triple = app.selectedVersion || { binary: app.binary, md5: app.md5, version: app.version };
-          const payload = Object.assign({}, app, {
+          return {
+            uuid: app.uuid,
+            name: app.name,
+            description: "",
+            image: app.image,
+            tags: app.tags,
+            devices: app.devices,
             binary: triple.binary,
             md5: triple.md5,
             version: triple.version,
-            description: "",
-          });
-          delete payload.previous_versions;
-          delete payload.allVersions;
-          delete payload.selectedVersion;
-          delete payload.installedVersion;
-          return payload;
+          };
         },
 
         dispatchAction(app, status) {
@@ -499,6 +501,41 @@
           const creator = this.creators[slug];
           const url = creator && creator.url ? String(creator.url).trim() : "";
           return /^https?:\/\//i.test(url) ? url : "";
+        },
+
+        // A catalog description, as HTML that keeps only its text, http(s)
+        // links and simple emphasis. The catalog is third-party data, like a
+        // creator's url: rendered as it came, <img src=x onerror=...> would run
+        // script in the device's own UI. DOMParser builds an inert document (no
+        // scripts run, no images load), which is then rebuilt from what is kept.
+        safeDescription(html) {
+          const esc = (t) => String(t).replace(/[&<>"']/g, (c) =>
+            ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+          const keep = ["b", "strong", "i", "em"];
+          const walk = (node) => {
+            let out = "";
+            node.childNodes.forEach((n) => {
+              if (n.nodeType === Node.TEXT_NODE) {
+                out += esc(n.textContent);
+              } else if (n.nodeType === Node.ELEMENT_NODE) {
+                const tag = n.tagName.toLowerCase();
+                if (tag === "script" || tag === "style") return;  // not text
+                const inner = walk(n);
+                const href = tag === "a" ? String(n.getAttribute("href") || "").trim() : "";
+                if (tag === "br") {
+                  out += "<br>";
+                } else if (href && /^https?:\/\//i.test(href)) {
+                  out += `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer">${inner}</a>`;
+                } else if (keep.includes(tag)) {
+                  out += `<${tag}>${inner}</${tag}>`;
+                } else {
+                  out += inner;  // any other element: only its text
+                }
+              }
+            });
+            return out;
+          };
+          return walk(new DOMParser().parseFromString(String(html || ""), "text/html").body);
         },
 
         // Official creators are pinned to the front of the chip list. The flag
@@ -979,7 +1016,7 @@
               </div>
             </template>
             <!-- App Description -->
-            <p x-html="app.description"></p>
+            <p x-html="safeDescription(app.description)"></p>
             <!-- Combined Tags in one line -->
             <div class="tags-row">
               <!-- App Tags -->
