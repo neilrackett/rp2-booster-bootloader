@@ -486,7 +486,10 @@ static void wifiLinkCallback(struct netif *netif) {
 }
 
 static void networkStatusCallback(struct netif *netif) {
-  if (netif_is_up(netif)) {
+  // lwIP calls this on any address change, and the driver brings the netif up
+  // at init: a static address, set before the join, must not count as
+  // connected. Only the link says the join has happened.
+  if (netif_is_up(netif) && netif_is_link_up(netif)) {
     connectionStatus = CONNECTED_WIFI_IP;
     snprintf(connectionStatusStr, sizeof(connectionStatusStr), "LINK UP");
     ip_addr_set(&currentIp, netif_ip_addr4(netif));
@@ -514,6 +517,8 @@ const char *network_WifiStaConnStatusString(
       return "Failed connecting WiFi";
     case NETWORK_WIFI_STA_CONN_ERR_TIMEOUT:
       return "Connection timeout    ";
+    case NETWORK_WIFI_STA_CONN_ERR_BAD_AUTH:
+      return "Wrong WiFi password   ";
     default:
       return "Unknown error";
   }
@@ -700,7 +705,10 @@ wifi_sta_conn_process_status_t network_wifiStaConnect() {
   // timesout.
   wifi_sta_conn_status_t prevStatus = DISCONNECTED;
   int wifiConnPollingInterval = 1;  // 1 seconds
-  absolute_time_t wifiConnStatusTime = make_timeout_time_ms(1 * SEC_TO_MS);
+  // Already due: the first pass asks the radio, not the status left over from
+  // before this join.
+  absolute_time_t wifiConnStatusTime = get_absolute_time();
+  wifi_sta_conn_process_status_t result = NETWORK_WIFI_STA_CONN_ERR_TIMEOUT;
   absolute_time_t wifiConnConnTimeout =
       make_timeout_time_ms(NETWORK_CONNECT_TIMEOUT * SEC_TO_MS);  // 30 seconds
   while (absolute_time_diff_us(get_absolute_time(), wifiConnConnTimeout) > 0) {
@@ -728,17 +736,26 @@ wifi_sta_conn_process_status_t network_wifiStaConnect() {
 #ifdef BLINK_H
       blink_on();
 #endif
+      result = NETWORK_WIFI_STA_CONN_OK;
+      break;
+    }
+    // The join has ended: waiting out the timeout would change nothing.
+    if (status == BADAUTH_ERROR) {
+      result = NETWORK_WIFI_STA_CONN_ERR_BAD_AUTH;
+      break;
+    }
+    if (status == CONNECT_FAILED_ERROR || status == GENERIC_ERROR) {
+      result = NETWORK_WIFI_STA_CONN_ERR_CONNECTION_FAILED;
       break;
     }
   }
-  if (absolute_time_diff_us(get_absolute_time(), wifiConnConnTimeout) <= 0) {
-    DPRINTF("WiFi connection timeout\n");
-    // Return the error code
-    return NETWORK_WIFI_STA_CONN_ERR_TIMEOUT;
+  if (result != NETWORK_WIFI_STA_CONN_OK) {
+    DPRINTF("WiFi connection failed: %d\n", result);
+    return result;
   }
 
   DPRINTF("Connected. Check the connection status...\n");
-  return 0;
+  return NETWORK_WIFI_STA_CONN_OK;
 }
 
 char *network_wifiConnStatusStr() { return connectionStatusStr; }
@@ -779,6 +796,10 @@ wifi_sta_conn_status_t network_wifiConnStatus(
       case CYW43_LINK_UP: {
         connectionStatus = CONNECTED_WIFI_IP;
         snprintf(connectionStatusStr, sizeof(connectionStatusStr), "LINK UP");
+        // With a static address nothing calls the status callback when the
+        // link comes up.
+        ip_addr_set(&currentIp,
+                    netif_ip_addr4(&cyw43_state.netif[CYW43_ITF_STA]));
         break;
       }
       case CYW43_LINK_FAIL: {

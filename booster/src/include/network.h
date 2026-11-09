@@ -74,8 +74,9 @@ typedef enum {
   NETWORK_WIFI_STA_CONN_ERR_NO_AUTH_MODE =
       -5,  // No authentication mode provided
   NETWORK_WIFI_STA_CONN_ERR_CONNECTION_FAILED =
-      -6,                                 // Failed to connect to WiFi
-  NETWORK_WIFI_STA_CONN_ERR_TIMEOUT = -7  // Connection timeout
+      -6,                                  // Failed to connect to WiFi
+  NETWORK_WIFI_STA_CONN_ERR_TIMEOUT = -7,  // Connection timeout
+  NETWORK_WIFI_STA_CONN_ERR_BAD_AUTH = -8  // The network refused the password
 } wifi_sta_conn_process_status_t;
 
 typedef enum {
