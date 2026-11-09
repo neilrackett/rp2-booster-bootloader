@@ -5,6 +5,7 @@
 #include <strings.h>
 
 #include "devapi.h"
+#include "httphdr.h"
 #include "jsonfield.h"
 #include "lookupbackup.h"
 #include "lwip/stats.h"
@@ -25,6 +26,10 @@ static download_status_t download_firmware_status = DOWNLOAD_STATUS_IDLE;
 static download_err_t download_error = DOWNLOAD_OK;
 static download_err_t download_firmware_error = DOWNLOAD_OK;
 static HTTPC_REQUEST_T request = {0};
+// Why the headers callback refused the response, when it did for a reason of
+// its own: the result callback reports it as is and does not retry, where it
+// would otherwise call any aborted transfer an HTTP error and try again.
+static download_err_t headers_refused = DOWNLOAD_OK;
 // Persistent storage for async HTTP request strings to avoid dangling pointers
 static char request_host_buf[256];
 static char request_uri_buf[1536];
@@ -189,6 +194,12 @@ static int sdcard_write_file(const char *filename, const char *data,
 }
 
 static download_err_t set_app_info(const char *json_str) {
+  // The entry is saved whole as the app's .json, which every reader parses:
+  // cut to fit, the app would install and then vanish from the installed list.
+  if (strlen(json_str) >= sizeof(app_info.json)) {
+    DPRINTF("App info too long: %u bytes\n", (unsigned)strlen(json_str));
+    return DOWNLOAD_PARSEJSON_ERROR;
+  }
   cJSON *root = cJSON_Parse(json_str);
   if (root == NULL) {
     DPRINTF("Error parsing JSON\n");
@@ -383,10 +394,12 @@ static void appmngr_sort_installed_apps(appmngr_installed_app_t *apps,
 download_err_t appmngr_save_app_info(const char *json_str) {
   // Save the app info to the SD card as a JSON file
 
-  int err = set_app_info(json_str);
-  if (err == DOWNLOAD_PARSEJSON_ERROR) {
+  // Any error, not only a parse error: a missing md5 used to install with
+  // the previous app's checksum and fail later as a "checksum mismatch".
+  download_err_t err = set_app_info(json_str);
+  if (err != DOWNLOAD_OK) {
     DPRINTF("Error setting app info: %i\n", err);
-    return DOWNLOAD_PARSEJSON_ERROR;
+    return err;
   }
   // We have the app info in the app_info struct, now save it to a temp file
   char filename[256] = {0};
@@ -501,39 +514,6 @@ static err_t http_client_receive_file_fn(__unused void *arg,
 }
 
 /**
- * @brief Find a header's value by name, case-insensitively.
- *
- * Ported from md-browser's download.c. Walks CRLF-delimited lines rather than
- * using strstr on the whole block, so a header name appearing inside another
- * header's value cannot match.
- */
-static bool appmngr_find_header_value(const char *headers, const char *name,
-                                      char *out, size_t out_len) {
-  size_t name_len = strlen(name);
-  const char *line = headers;
-  while (line != NULL && *line != '\0') {
-    if (strncasecmp(line, name, name_len) == 0) {
-      const char *value = line + name_len;
-      while (*value == ' ' || *value == '\t') {
-        value++;
-      }
-      size_t len = strcspn(value, "\r\n");
-      if (len == 0 || len >= out_len) {
-        return false;  // absent, or too long to use safely
-      }
-      memcpy(out, value, len);
-      out[len] = '\0';
-      return true;
-    }
-    line = strstr(line, "\r\n");
-    if (line != NULL) {
-      line += 2;
-    }
-  }
-  return false;
-}
-
-/**
  * @brief Turn a Location value into an absolute URL.
  *
  * Location may be absolute, host-relative ("/path"), or path-relative
@@ -618,8 +598,7 @@ static err_t http_client_header_check_size_fn(
       DPRINTF("Redirect limit (%d) exceeded\n", APPMNGR_MAX_REDIRECT_HOPS);
     } else {
       char location[APPMNGR_MAX_URL_SIZE];
-      if (appmngr_find_header_value(buf, "Location:", location,
-                                    sizeof(location))) {
+      if (httphdr_find(buf, "Location:", location, sizeof(location))) {
         appmngr_resolve_redirect_url(location, redirect_url,
                                      sizeof(redirect_url));
         DPRINTF("HTTP %d redirect to: %s\n", http_status, redirect_url);
@@ -678,6 +657,18 @@ static err_t http_client_header_check_size_fn(
     p = eol ? (eol + 2) : NULL;
   }
 
+  // Chunked framing would be written into the file as if it were data, and
+  // the result found out only at the checksum, as a corrupt download.
+  if (httphdr_is_chunked(buf)) {
+    DPRINTF("Chunked transfer refused\n");
+    headers_refused = DOWNLOAD_CHUNKED_ERROR;
+    if (download_type == DOWNLOAD_TYPE_FIRMWARE)
+      download_firmware_status = DOWNLOAD_STATUS_FAILED;
+    else
+      download_status = DOWNLOAD_STATUS_FAILED;
+    return ERR_ABRT;
+  }
+
   // A 2xx with headers parsed: the payload transfer starts now.
   download_phase = APPMNGR_PHASE_DOWNLOAD;
   if (download_type == DOWNLOAD_TYPE_FIRMWARE)
@@ -717,6 +708,19 @@ static void http_client_result_complete_fn(void *arg,
       download_status = DOWNLOAD_STATUS_IN_PROGRESS;
       download_error = DOWNLOAD_OK;
     }
+    return;
+  }
+
+  if (headers_refused != DOWNLOAD_OK) {
+    DPRINTF("Refused at the headers: %d\n", headers_refused);
+    if (download_type == DOWNLOAD_TYPE_FIRMWARE) {
+      download_firmware_status = DOWNLOAD_STATUS_FAILED;
+      download_firmware_error = headers_refused;
+    } else {
+      download_status = DOWNLOAD_STATUS_FAILED;
+      download_error = headers_refused;
+    }
+    appmngr_cleanup_tmp_download_file();
     return;
   }
 
@@ -1264,6 +1268,10 @@ const char *appmngr_download_error_to_str(download_err_t err) {
       return "HTTP error";
     case DOWNLOAD_MD5UNAVAILABLE_ERROR:
       return "Firmware checksum (upgrade.md5) missing or unreadable";
+    case DOWNLOAD_CHUNKED_ERROR:
+      return "The server sent the file in chunks, which is not supported";
+    case DOWNLOAD_BUSY_ERROR:
+      return "Another download is in progress";
     default:
       return "Unknown error";
   }
@@ -2111,7 +2119,7 @@ download_launch_err_t appmngr_launch_app() {
   return DOWNLOAD_LAUNCHAPP_OK;
 }
 
-download_err_t appmngr_start_download(const char *url) {
+static download_err_t appmngr_start_download_open(const char *url) {
   // Download the app binary from the URL in the app_info struct
   // The binary is saved to the SD card in the apps folder
   // The filename must be the UUID of the app with the .bin extension
@@ -2163,8 +2171,9 @@ download_err_t appmngr_start_download(const char *url) {
     appmngr_fs_unlock();
     return DOWNLOAD_CANNOTOPENFILE_ERROR;
   }
-  appmngr_fs_unlock();
 
+  // Still under the lock: FatFs has one sector window for every file
+  // (FF_FS_TINY), and a page served meanwhile reads the card too.
   UINT bw = 0;
   const uint8_t probe_byte = 0;
   res = f_write(&file, &probe_byte, sizeof(probe_byte), &bw);
@@ -2172,6 +2181,7 @@ download_err_t appmngr_start_download(const char *url) {
     DPRINTF("Error probing file write %s: %i (wrote %u of %u)\n", filename, res,
             (unsigned)bw, (unsigned)sizeof(probe_byte));
     f_close(&file);
+    appmngr_fs_unlock();
     return DOWNLOAD_CANNOTWRITEFILE_ERROR;
   }
   res = f_lseek(&file, 0);
@@ -2181,8 +2191,10 @@ download_err_t appmngr_start_download(const char *url) {
   if (res != FR_OK) {
     DPRINTF("Error resetting temp file %s: %i\n", filename, res);
     f_close(&file);
+    appmngr_fs_unlock();
     return DOWNLOAD_CANNOTWRITEFILE_ERROR;
   }
+  appmngr_fs_unlock();
 
   // A fresh download starts the hop count over; a redirect re-issue must not.
   // The pending/settling flags must be cleared too: if a previous attempt died
@@ -2235,6 +2247,7 @@ download_err_t appmngr_start_download(const char *url) {
     download_firmware_status = DOWNLOAD_STATUS_STARTED;
     download_firmware_error = DOWNLOAD_OK;
   }
+  headers_refused = DOWNLOAD_OK;
   // Every hop restarts the destination file, so the counters restart with it.
   // This must NOT be limited to a fresh download: a redirect re-issue and a
   // retry both truncate and rewrite the same file.
@@ -2309,6 +2322,36 @@ download_err_t appmngr_start_download(const char *url) {
   return DOWNLOAD_OK;
 }
 
+download_err_t appmngr_start_download(const char *url) {
+  download_err_t err = appmngr_start_download_open(url);
+  if (err != DOWNLOAD_OK) {
+    // Whatever stopped the start, the temporary file is not left open: the
+    // caller reports the failure and a retry opens it again.
+    appmngr_close_download_file();
+  }
+  return err;
+}
+
+bool appmngr_download_in_flight(void) {
+  if (request.url != NULL && !request.complete) {
+    return true;
+  }
+  download_status_t states[] = {download_status, download_firmware_status};
+  for (size_t i = 0; i < sizeof(states) / sizeof(states[0]); i++) {
+    switch (states[i]) {
+      case DOWNLOAD_STATUS_REQUESTED:
+      case DOWNLOAD_STATUS_NOT_STARTED:
+      case DOWNLOAD_STATUS_STARTED:
+      case DOWNLOAD_STATUS_IN_PROGRESS:
+      case DOWNLOAD_STATUS_COMPLETED:
+        return true;
+      default:
+        break;
+    }
+  }
+  return false;
+}
+
 download_poll_t appmngr_poll_download_app() {
   if (!request.complete) {
     async_context_poll(cyw43_arch_async_context());
@@ -2343,10 +2386,13 @@ download_poll_t appmngr_poll_download_app() {
     if (retry_err != DOWNLOAD_OK) {
       DPRINTF("Hop retry failed to start: %d\n", retry_err);
       appmngr_cleanup_tmp_download_file();
-      if (download_type == DOWNLOAD_TYPE_FIRMWARE)
+      if (download_type == DOWNLOAD_TYPE_FIRMWARE) {
         download_firmware_status = DOWNLOAD_STATUS_FAILED;
-      else
+        download_firmware_error = retry_err;
+      } else {
         download_status = DOWNLOAD_STATUS_FAILED;
+        download_error = retry_err;
+      }
       return DOWNLOAD_POLL_COMPLETED;
     }
     return DOWNLOAD_POLL_CONTINUE;
@@ -2382,10 +2428,13 @@ download_poll_t appmngr_poll_download_app() {
     following_redirect = false;
     if (err != DOWNLOAD_OK) {
       DPRINTF("Redirect re-issue failed: %d\n", err);
-      if (download_type == DOWNLOAD_TYPE_FIRMWARE)
+      if (download_type == DOWNLOAD_TYPE_FIRMWARE) {
         download_firmware_status = DOWNLOAD_STATUS_FAILED;
-      else
+        download_firmware_error = err;
+      } else {
         download_status = DOWNLOAD_STATUS_FAILED;
+        download_error = err;
+      }
       return DOWNLOAD_POLL_COMPLETED;
     }
     return DOWNLOAD_POLL_CONTINUE;
@@ -2640,10 +2689,12 @@ download_err_t appmngr_confirm_download_firmware() {
   snprintf(upgrade_filename, sizeof(upgrade_filename), "%s/upgrade.bin",
            settings_find_entry(gconfig_getContext(), PARAM_APPS_FOLDER)->value);
 
-  // Delete it first
+  // Delete it first. Under the lock, like every other write to the card
+  // made outside lwIP's own callbacks.
+  appmngr_fs_lock();
   f_unlink(upgrade_filename);
-
   FRESULT res = f_rename(tmp_binary_filename, upgrade_filename);
+  appmngr_fs_unlock();
   if (res != FR_OK) {
     DPRINTF("Error renaming tmp file: %i\n", res);
     return DOWNLOAD_CANNOTRENAMEFILE_ERROR;

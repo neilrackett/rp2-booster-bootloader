@@ -380,7 +380,13 @@ int mngr_init() {
             // Start the download. NULL means use info in app_info
             err = appmngr_start_download(NULL);
             if (err != DOWNLOAD_OK) {
+              // Failed before any transfer: report it, or the page waits on
+              // "Connecting" and this state starts again on every pass.
               DPRINTF("Error downloading app. Drive to error page.\n");
+              appmngr_download_error(err);
+              appmngr_set_download_phase(APPMNGR_PHASE_FAILED);
+              appmngr_confirm_failed_download_app();
+              appmngr_download_status(DOWNLOAD_STATUS_FAILED);
             }
           }
           break;
@@ -414,6 +420,18 @@ int mngr_init() {
           appmngr_download_status(DOWNLOAD_STATUS_IDLE);
           break;
         }
+        case DOWNLOAD_STATUS_FAILED: {
+          // The HTTP callbacks mark a refused or dropped transfer FAILED
+          // themselves, past the STARTED case above: the page follows the
+          // phase, so move it on once, or it shows "Connecting" forever.
+          if (appmngr_get_download_phase() != APPMNGR_PHASE_FAILED &&
+              appmngr_get_download_phase() != APPMNGR_PHASE_IDLE) {
+            DPRINTF("Download failed: %d\n", appmngr_get_download_error());
+            appmngr_set_download_phase(APPMNGR_PHASE_FAILED);
+            appmngr_confirm_failed_download_app();
+          }
+          break;
+        }
       }
     }
 
@@ -433,6 +451,14 @@ int mngr_init() {
                 fw_fetching_md5 ? FIRMWARE_MD5_URL : FIRMWARE_BINARY_URL);
             if (err != DOWNLOAD_OK) {
               DPRINTF("Error downloading firmware. Drive to error page.\n");
+              // As for a transfer that fails: the Upgrade page follows the
+              // phase. A failed upgrade.md5 start is turned into its own
+              // error by the FAILED case below.
+              appmngr_download_firmware_error(err);
+              appmngr_set_download_phase(APPMNGR_PHASE_FAILED);
+              appmngr_confirm_failed_download_firmware();
+              appmngr_download_firmware_status(DOWNLOAD_STATUS_FAILED);
+              firmware_upgrade_state = FIRMWARE_UPGRADE_FAILED;
             }
           }
           break;
@@ -448,6 +474,14 @@ int mngr_init() {
             appmngr_set_progress_reporting(true);
             appmngr_download_firmware_error(DOWNLOAD_MD5UNAVAILABLE_ERROR);
             appmngr_set_download_phase(APPMNGR_PHASE_FAILED);
+            firmware_upgrade_state = FIRMWARE_UPGRADE_FAILED;
+          } else if (firmware_upgrade_state != FIRMWARE_UPGRADE_FAILED) {
+            // The image itself, marked FAILED by the HTTP callbacks: as for
+            // an app, the Upgrade page needs the phase.
+            DPRINTF("Firmware download failed: %d\n",
+                    appmngr_get_download_firmware_error());
+            appmngr_set_download_phase(APPMNGR_PHASE_FAILED);
+            appmngr_confirm_failed_download_firmware();
             firmware_upgrade_state = FIRMWARE_UPGRADE_FAILED;
           }
           break;
