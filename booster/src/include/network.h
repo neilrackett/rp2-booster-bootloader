@@ -158,6 +158,14 @@ int network_wifiInit(wifi_mode_t mode);
 void network_deInit();
 
 /**
+ * @brief Whether the WiFi chip and its async context are up.
+ *
+ * False before the first init and after network_deInit(), when no cyw43
+ * function, the async-context lock included, may be called.
+ */
+bool network_isInitialized(void);
+
+/**
  * @brief Safely processes periodic network tasks.
  *
  * Performs polling on the network stack, ensuring operations occur in a safe
