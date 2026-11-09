@@ -422,7 +422,7 @@ The **Network view** shows the list of available WiFi networks and permits some 
 - **Hostname**: The hostname of the device. This is used to identify the device on the network. By default is `sidecart`. 
 - **Wifi Power**: The power of the WiFi module. From 0 to 4. 
 - **Show RSSI**: Show the RSSI of the WiFi module. This is used to show the signal strength of the WiFi network.
-- **DHCP Enabled**: Enable or disable DHCP for the device. If disabled, the TCP/IP settings view lets you enter a static IPv4 address, netmask, gateway, and DNS servers.
+- **DHCP Enabled**: Enable or disable DHCP for the device. If disabled, the TCP/IP settings view lets you enter a static IPv4 address, netmask, gateway, and DNS servers (one, or two separated by a comma; optional). They are checked when you click **Save**: if one is not valid, the page names it and nothing is saved.
 
 The system information banner also shows the Pico W MAC address, which is useful when configuring router allow-lists or debugging network issues.
 

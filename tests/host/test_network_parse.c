@@ -94,5 +94,42 @@ int main(void) {
   char list[NETWORK_DNS_LIST_STR_MAX];
   CHECK(network_parseDnsList("255.255.255.254,255.255.255.254", list));
   CHECK_EQ(strlen(list), NETWORK_DNS_LIST_STR_MAX - 1);
+
+  // A whole static configuration, with the Network page's field names.
+  network_static_config_t cfg;
+  CHECK(network_checkStaticConfig(" 192.168.1.50 ", "255.255.255.0",
+                                  "192.168.1.1", "1.1.1.1,8.8.8.8",
+                                  &cfg) == NULL);
+  CHECK(strcmp(cfg.address, "192.168.1.50") == 0);
+  CHECK(strcmp(cfg.netmask, "255.255.255.0") == 0);
+  CHECK(strcmp(cfg.gateway, "192.168.1.1") == 0);
+  CHECK(strcmp(cfg.dns, "1.1.1.1,8.8.8.8") == 0);
+  // DNS is optional, one server is enough.
+  CHECK(network_checkStaticConfig("10.0.0.2", "255.0.0.0", "10.0.0.1", "",
+                                  &cfg) == NULL);
+  CHECK_EQ(cfg.dns[0], '\0');
+  CHECK(network_checkStaticConfig("10.0.0.2", "255.0.0.0", "10.0.0.1", NULL,
+                                  &cfg) == NULL);
+  CHECK(network_checkStaticConfig("10.0.0.2", "255.0.0.0", "10.0.0.1",
+                                  "8.8.8.8", &cfg) == NULL);
+  CHECK(strcmp(cfg.dns, "8.8.8.8") == 0);
+  // Each field wrong in turn, and the first wrong one is the one named.
+  const char *bad = network_checkStaticConfig("192.168.1", "255.255.255.0",
+                                              "192.168.1.1", "", &cfg);
+  CHECK(bad != NULL && strcmp(bad, "IP address") == 0);
+  bad = network_checkStaticConfig("192.168.1.50", "255.0.255.0", "192.168.1.1",
+                                  "", &cfg);
+  CHECK(bad != NULL && strcmp(bad, "netmask") == 0);
+  bad = network_checkStaticConfig("192.168.1.50", "255.255.255.0", "gateway",
+                                  "", &cfg);
+  CHECK(bad != NULL && strcmp(bad, "gateway") == 0);
+  bad = network_checkStaticConfig("192.168.1.50", "255.255.255.0",
+                                  "192.168.1.1", "1.1.1.1,", &cfg);
+  CHECK(bad != NULL && strcmp(bad, "DNS") == 0);
+  bad = network_checkStaticConfig("x", "y", "z", "w", &cfg);
+  CHECK(bad != NULL && strcmp(bad, "IP address") == 0);
+  bad =
+      network_checkStaticConfig(NULL, "255.255.255.0", "192.168.1.1", "", &cfg);
+  CHECK(bad != NULL && strcmp(bad, "IP address") == 0);
   TEST_END();
 }

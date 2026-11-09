@@ -234,3 +234,22 @@ bool network_parseDnsList(const char *text, char *outList) {
   return true;
 }
 // NOLINTEND(readability-magic-numbers)
+
+const char *network_checkStaticConfig(const char *address, const char *netmask,
+                                      const char *gateway, const char *dns,
+                                      network_static_config_t *out) {
+  if (!network_parseIPv4Address(address, out->address)) {
+    return "IP address";
+  }
+  if (!network_parseIPv4Netmask(netmask, out->netmask)) {
+    return "netmask";
+  }
+  if (!network_parseIPv4Address(gateway, out->gateway)) {
+    return "gateway";
+  }
+  out->dns[0] = '\0';
+  if (dns != NULL && dns[0] != '\0' && !network_parseDnsList(dns, out->dns)) {
+    return "DNS";
+  }
+  return NULL;
+}

@@ -347,6 +347,73 @@ static bool mngr_httpd_isWificonfKey(const char *name) {
   return false;
 }
 
+// The value of the named setting in a /saveparams.cgi payload, or NULL.
+static const char *mngr_httpd_jsonParam(const cJSON *root, const char *key) {
+  const cJSON *item = NULL;
+  cJSON_ArrayForEach(item, root) {
+    const cJSON *name = cJSON_GetObjectItem(item, "name");
+    const cJSON *value = cJSON_GetObjectItem(item, "value");
+    if (cJSON_IsString(name) && cJSON_IsString(value) &&
+        strcmp(name->valuestring, key) == 0) {
+      return value->valuestring;
+    }
+  }
+  return NULL;
+}
+
+// A setting from the payload, or its stored value when the payload has none.
+static const char *mngr_httpd_paramOrStored(const char *value,
+                                            const char *key) {
+  if (value != NULL) {
+    return value;
+  }
+  SettingsConfigEntry *entry = settings_find_entry(gconfig_getContext(), key);
+  return entry != NULL ? entry->value : NULL;
+}
+
+// Checks the static TCP/IP settings in a /saveparams.cgi payload before any of
+// them is stored: a typo stored here is applied at the next boot and takes the
+// device off the network. Only when the payload touches them and DHCP ends up
+// off, so a value left in flash cannot block saving something else. Fields the
+// payload does not carry count with their stored value. Returns the name of
+// the first invalid field, or NULL; *isStatic says *out holds what to store.
+static const char *mngr_httpd_checkStaticTcpip(const cJSON *root,
+                                               network_static_config_t *out,
+                                               bool *isStatic) {
+  *isStatic = false;
+  const char *dhcp = mngr_httpd_jsonParam(root, PARAM_WIFI_DHCP);
+  const char *address = mngr_httpd_jsonParam(root, PARAM_WIFI_IP);
+  const char *netmask = mngr_httpd_jsonParam(root, PARAM_WIFI_NETMASK);
+  const char *gateway = mngr_httpd_jsonParam(root, PARAM_WIFI_GATEWAY);
+  const char *dns = mngr_httpd_jsonParam(root, PARAM_WIFI_DNS);
+  if (dhcp == NULL && address == NULL && netmask == NULL && gateway == NULL &&
+      dns == NULL) {
+    return NULL;
+  }
+  const char *finalDhcp = mngr_httpd_paramOrStored(dhcp, PARAM_WIFI_DHCP);
+  if (finalDhcp != NULL && starts_with_case_insensitive(finalDhcp, "YyTt")) {
+    return NULL;
+  }
+  const char *bad = network_checkStaticConfig(
+      mngr_httpd_paramOrStored(address, PARAM_WIFI_IP),
+      mngr_httpd_paramOrStored(netmask, PARAM_WIFI_NETMASK),
+      mngr_httpd_paramOrStored(gateway, PARAM_WIFI_GATEWAY),
+      mngr_httpd_paramOrStored(dns, PARAM_WIFI_DNS), out);
+  *isStatic = (bad == NULL);
+  return bad;
+}
+
+// The canonical text to store for a static TCP/IP setting, or NULL for any
+// other setting.
+static const char *mngr_httpd_canonicalTcpip(
+    const char *name, const network_static_config_t *cfg) {
+  if (strcmp(name, PARAM_WIFI_IP) == 0) return cfg->address;
+  if (strcmp(name, PARAM_WIFI_NETMASK) == 0) return cfg->netmask;
+  if (strcmp(name, PARAM_WIFI_GATEWAY) == 0) return cfg->gateway;
+  if (strcmp(name, PARAM_WIFI_DNS) == 0) return cfg->dns;
+  return NULL;
+}
+
 /**
  * @brief Update the given params with the new values
  *
@@ -413,6 +480,18 @@ const char *cgi_saveparams(int iIndex, int iNumParams, char *pcParam[],
               }
             }
           }
+          network_static_config_t staticConfig;
+          bool isStatic = false;
+          const char *badField =
+              mngr_httpd_checkStaticTcpip(root, &staticConfig, &isStatic);
+          if (badField != NULL) {
+            DPRINTF("Refusing the TCP/IP settings: invalid %s\n", badField);
+            response_status = MNGR_HTTPD_RESPONSE_BAD_REQUEST;
+            snprintf(httpd_response_message, sizeof(httpd_response_message),
+                     "Invalid %s. Nothing was saved.", badField);
+            cJSON_Delete(root);
+            return "/response.shtml";
+          }
           // Iterate over the JSON array
           cJSON *item = NULL;
           cJSON_ArrayForEach(item, root) {
@@ -423,13 +502,18 @@ const char *cgi_saveparams(int iIndex, int iNumParams, char *pcParam[],
             // Print each parameter
             if (cJSON_IsString(name) && cJSON_IsString(type) &&
                 cJSON_IsString(value)) {
-              DPRINTF("Param Name: %s, Type: %s, Value: %s\n",
-                      name->valuestring, type->valuestring, value->valuestring);
+              // The value is not logged: this also carries the WiFi password.
+              DPRINTF("Param Name: %s, Type: %s\n", name->valuestring,
+                      type->valuestring);
               if (strcasecmp(type->valuestring, "STRING") == 0) {
-                settings_put_string(gconfig_getContext(), name->valuestring,
-                                    value->valuestring);
-                DPRINTF("Setting %s to %s saved.\n", name->valuestring,
-                        value->valuestring);
+                const char *canonical =
+                    isStatic ? mngr_httpd_canonicalTcpip(name->valuestring,
+                                                         &staticConfig)
+                             : NULL;
+                settings_put_string(
+                    gconfig_getContext(), name->valuestring,
+                    canonical != NULL ? canonical : value->valuestring);
+                DPRINTF("Setting %s saved.\n", name->valuestring);
               } else if (strcasecmp(type->valuestring, "INT") == 0) {
                 settings_put_integer(gconfig_getContext(), name->valuestring,
                                      atoi(value->valuestring));
