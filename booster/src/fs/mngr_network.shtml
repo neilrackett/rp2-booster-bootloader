@@ -360,12 +360,13 @@
 
   <!-- Blue Banner Header -->
   <header class="header">
-    <h1><!--#TITLEHDR--></h1>
+    <h1><!--#TITLEH1--></h1>
   </header>
 
   <!-- Navigation Bar -->
-  <nav class="nav-bar">
-    <div class="pure-menu pure-menu-horizontal">
+  <nav class="nav-bar" x-data="{ open: false }" @click.outside="open = false" @keydown.escape.window="open = false">
+    <button type="button" class="nav-toggle" :aria-expanded="open" @click="open = !open"><i class="fas fa-bars" aria-hidden="true"></i> Menu</button>
+    <div class="pure-menu pure-menu-horizontal" :class="{ 'nav-open': open }">
       <ul class="pure-menu-list">
         <li class="pure-menu-item">
           <a href="/mngr_home.shtml" class="pure-menu-link">Apps</a>

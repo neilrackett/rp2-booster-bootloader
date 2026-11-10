@@ -25,17 +25,21 @@
   <script>
     function appManager() {
       return {
-        apps: [],         // Remote apps
-        creators: {},     // Catalog creators, keyed by creator id (may be absent)
-        local_apps: [],   // Local apps discovered via cgi
-        installed_app: [],
-        machineFilters: [],
-        typeFilters: [],
-        creatorFilters: [],
-        selectedMachines: [],
-        selectedTypes: [],
-        selectedCreators: [],
+        shelfMin: 3,
         loaded_apps: false,
+        apps: [],
+        creators: {},
+        local_apps: [],
+        machineFilters: [],
+        tagFilters: [],
+        creatorFilters: [],
+        shelves: [],
+        query: '',
+        tag: '',
+        machine: '',
+        creator: '',
+        detail: null,
+        detailOpener: null,
         showDeleteModal: false,
         showLaunchModal: false,
         showRestoreModal: false,
@@ -51,22 +55,16 @@
         // The development app's fixed UUID. Only its card offers "Restore and
         // launch" (EPIC-11); the firmware refuses a restore for any other app.
         devAppUuid: '44444444-4444-4444-8444-444444444444',
-        // True only when Config has "Development - Local development only"
-        // selected. Exact match, the same rule the firmware uses for the deploy
-        // API gate (DEVAPI_DEV_CATALOG_URL), so a custom catalog URL is not it.
-        devChannelSelected: `<!--#APPSURL-->` === 'https://md-store.sidecartridge.com/atari-st/apps-dev.json',
         uuidToDowngrade: null,
         downgradeFromVersion: null,
         downgradeToVersion: null,
         retryAttempts: 0,
         maxRetries: 3,
-        initialized: false, // new flag to prevent duplicate init
-        fetchError: false,  // new flag for remote fetch error
+        initialized: false,
+        fetchError: false,
         // Release type filters the catalog that is already loaded. It does not
         // choose WHICH catalog to load -- that is the Config page's job, and
         // whatever it points at is what these chips filter.
-        releaseTypes: ['all', 'stable', 'beta'],
-        releaseTypeLabels: { all: 'All', stable: 'Stable', beta: 'Beta' },
         selectedReleaseType: 'all',
 
         init() {
@@ -90,108 +88,39 @@
               this.apps.forEach((app) => this.normalizeVersions(app));
 
               // 2) Fetch local apps
-              this.fetchLocalAppsFirst();
+              this.fetchLocalApps(true);
             })
             .catch((error) => {
-              console.error("Error fetching remote apps:", error);
               this.fetchError = true;
-              this.fetchLocalAppsFirst();
+              this.fetchLocalApps(true);
             });
         },
 
-        // -------------------------------------
-        // Fetch the *first* local app JSON
-        // from /mngr_fsfirst.cgi
-        // -------------------------------------
-        fetchLocalAppsFirst() {
-          fetch("/mngr_fsfirst.cgi")
+        // The device lists its apps one at a time: first, then next until an
+        // empty answer. A failed request starts the list again.
+        fetchLocalApps(first) {
+          fetch(first ? "/mngr_fsfirst.cgi" : "/mngr_fsnext.cgi")
             .then((response) => {
-              if (!response.ok) {
-                throw new Error(`HTTP error! Status: ${response.status}`);
-              }
-              // Read the response as text
+              if (!response.ok) throw new Error(response.status);
               return response.text();
             })
             .then((text) => {
-              try {
-                const data = JSON.parse(text);
-                if (this.isNonEmptyObject(data)) {
-                  this.local_apps.push(data);
-                  // Reset retry counter on success
-                  this.retryAttempts = 0;
-                  // Move on to fetch next
-                  this.fetchLocalAppsNext();
-                } else {
-                  console.log("No local apps found (no first JSON).");
-                  // Merge info now that we know no local apps
-                  this.mergeLocalIntoApps();
-                }
-              } catch (error) {
-                console.error("Error parsing response as JSON:", error);
-                console.log("Raw response text:", text);
-                // Merge anyway (since we presumably have no local apps)
+              let data = null;
+              try { data = JSON.parse(text); } catch (error) { /* no more apps */ }
+              if (data && this.isNonEmptyObject(data)) {
+                this.local_apps.push(data);
+                this.retryAttempts = 0;
+                this.fetchLocalApps(false);
+              } else {
                 this.mergeLocalIntoApps();
               }
             })
-            .catch((error) => {
-              console.error("Error fetching first local app:", error);
+            .catch(() => {
               if (this.retryAttempts < this.maxRetries) {
                 this.retryAttempts++;
-                console.log(`Retrying fetchLocalAppsFirst: attempt ${this.retryAttempts}/${this.maxRetries}`);
-                // Optionally reset local_apps to start fresh
                 this.local_apps = [];
-                this.fetchLocalAppsFirst();
+                this.fetchLocalApps(true);
               } else {
-                console.error("Max retries reached in fetchLocalAppsFirst. Proceeding with merge.");
-                this.mergeLocalIntoApps();
-              }
-            });
-        },
-
-        // -------------------------------------
-        // Fetch the *next* local app JSON
-        // from /mngr_fsnext.cgi
-        // Keep calling until it returns empty
-        // -------------------------------------
-        fetchLocalAppsNext() {
-          fetch("/mngr_fsnext.cgi")
-            .then((response) => {
-              if (!response.ok) {
-                throw new Error(`HTTP error! Status: ${response.status}`);
-              }
-              return response.text();
-            })
-            .then((text) => {
-              try {
-                const data = JSON.parse(text);
-                if (this.isNonEmptyObject(data)) {
-                  this.local_apps.push(data);
-                  // Reset retry counter on success
-                  this.retryAttempts = 0;
-                  // Keep going
-                  this.fetchLocalAppsNext();
-                } else {
-                  console.log("No more local apps. Done.");
-                  // Merge once we've finished
-                  this.mergeLocalIntoApps();
-                }
-              } catch (error) {
-                console.error("Error parsing response as JSON:", error);
-                console.log("Raw response text:", text);
-                // Probably no more local apps or invalid data
-                this.mergeLocalIntoApps();
-              }
-            })
-            .catch((error) => {
-              console.log("Error fetching next local app:", error);
-              if (this.retryAttempts < this.maxRetries) {
-                this.retryAttempts++;
-                console.log(`Retrying from fetchLocalAppsNext: attempt ${this.retryAttempts}/${this.maxRetries}`);
-                // Optionally reset local_apps to start fresh
-                this.local_apps = [];
-                this.fetchLocalAppsFirst();
-              } else {
-                console.error("Max retries reached in fetchLocalAppsNext. Proceeding with merge.");
                 this.mergeLocalIntoApps();
               }
             });
@@ -206,8 +135,6 @@
         // -------------------------------------
         mergeLocalIntoApps() {
           this.apps.forEach((remoteApp) => {
-            // Always add 'launched' = false
-            remoteApp.launched = false;
             // Busy flag to prevent multiple clicks on actions like Download/Update
             if (typeof remoteApp.busy === 'undefined') {
               remoteApp.busy = false;
@@ -237,10 +164,8 @@
           });
 
           // After merging, you can log or do any additional logic
-          console.log("Final remote apps with local info:", this.apps);
 
           // Show local apps
-          console.log("Local apps:", this.local_apps);
 
           // Confirm that we're done
           this.buildTaxonomyFilters();
@@ -519,7 +444,7 @@
                 out += esc(n.textContent);
               } else if (n.nodeType === Node.ELEMENT_NODE) {
                 const tag = n.tagName.toLowerCase();
-                if (tag === "script" || tag === "style") return;  // not text
+                if (tag === "script" || tag === "style") return;
                 const inner = walk(n);
                 const href = tag === "a" ? String(n.getAttribute("href") || "").trim() : "";
                 if (tag === "br") {
@@ -529,7 +454,7 @@
                 } else if (keep.includes(tag)) {
                   out += `<${tag}>${inner}</${tag}>`;
                 } else {
-                  out += inner;  // any other element: only its text
+                  out += inner;
                 }
               }
             });
@@ -580,84 +505,145 @@
           };
 
           this.machineFilters = buildOptions((app) => this.getAppMachines(app));
-          this.typeFilters = buildOptions((app) => this.getAppTypes(app));
+          // Most tags belong to a single app. Those stay searchable, but only
+          // tags that group apps earn a place on the screen.
+          this.tagFilters = buildOptions((app) => this.getAppTypes(app))
+            .filter((option) => option.count > 1)
+            .sort((a, b) => b.count - a.count);
 
-          // Creators carry a label distinct from their value: chips filter on
-          // the slug (a stable id, so renaming a creator cannot invalidate a
-          // selection) but display the name. Official creators always come
-          // first; within each group, sorted by label, since that is what the
-          // user reads -- slug order and display order can differ.
+          // Official creators first, then by the name the user reads.
           this.creatorFilters = buildOptions((app) => this.getAppCreators(app))
             .map((option) => ({
               value: option.value,
               label: this.creatorLabel(option.value),
-              count: option.count,
-              url: this.creatorUrl(option.value),
               official: this.creatorIsOfficial(option.value),
             }))
             .sort((a, b) => {
               if (a.official !== b.official) return a.official ? -1 : 1;
               return a.label.localeCompare(b.label, undefined, { sensitivity: "base" });
             });
+
+          this.buildShelves();
         },
 
-        toggleSelection(target, value) {
-          const values = this[target];
-          const index = values.indexOf(value);
-
-          if (index >= 0) {
-            values.splice(index, 1);
-          } else {
-            values.push(value);
-          }
+        // Every app goes on the shelf of its most common tag, once, so a
+        // shelf's count is the truth; what no shelf takes goes on the last one.
+        buildShelves() {
+          const counts = new Map(this.tagFilters.map((t) => [t.value, t.count]));
+          const shelves = new Map();
+          const more = [];
+          this.apps.forEach((app) => {
+            const best = this.getAppTypes(app)
+              .filter((t) => counts.get(t) >= this.shelfMin)
+              .sort((a, b) => counts.get(b) - counts.get(a))[0];
+            if (!best) {
+              more.push(app);
+            } else {
+              if (!shelves.has(best)) shelves.set(best, []);
+              shelves.get(best).push(app);
+            }
+          });
+          const result = [...shelves.entries()]
+            .filter(([, apps]) => apps.length > 1 || (more.push(...apps), false))
+            .sort((a, b) => b[1].length - a[1].length)
+            .map(([title, apps]) => ({ title, apps: this.byStatus(apps) }));
+          if (more.length) result.push({ title: result.length ? 'More apps' : 'Apps', apps: this.byStatus(more) });
+          this.shelves = result;
         },
 
-        isSelected(target, value) {
-          return this[target].includes(value);
+        // Updates first, then the rest of the installed apps.
+        byStatus(apps) {
+          const rank = (app) => (app.update ? 2 : app.installed ? 1 : 0);
+          return apps.sort((a, b) => rank(b) - rank(a));
         },
 
         clearFilters() {
-          this.selectedMachines = [];
-          this.selectedTypes = [];
-          this.selectedCreators = [];
+          this.query = this.tag = this.machine = this.creator = '';
           this.selectedReleaseType = 'all';
         },
 
         hasActiveFilters() {
-          return (
-            this.selectedMachines.length > 0 ||
-            this.selectedTypes.length > 0 ||
-            this.selectedCreators.length > 0 ||
-            this.selectedReleaseType !== 'all'
-          );
+          return !!(this.query.trim() || this.tag || this.machine || this.creator ||
+            this.selectedReleaseType !== 'all');
         },
 
         matchesSelectedFilters(app) {
-          const matchesMachines =
-            this.selectedMachines.length === 0 ||
-            this.getAppMachines(app).some((value) => this.selectedMachines.includes(value));
-          const matchesTypes =
-            this.selectedTypes.length === 0 ||
-            this.getAppTypes(app).some((value) => this.selectedTypes.includes(value));
-          const matchesCreators =
-            this.selectedCreators.length === 0 ||
-            this.getAppCreators(app).some((value) => this.selectedCreators.includes(value));
-
-          return (
-            matchesMachines && matchesTypes && matchesCreators &&
-            this.matchesReleaseType(app)
-          );
+          if (this.machine && !this.getAppMachines(app).includes(this.machine)) return false;
+          if (this.tag && !this.getAppTypes(app).includes(this.tag)) return false;
+          if (this.creator && !this.getAppCreators(app).includes(this.creator)) return false;
+          if (!this.matchesReleaseType(app)) return false;
+          const words = this.query.toLowerCase().split(/\s+/).filter(Boolean);
+          if (!words.length) return true;
+          const text = [app.name, (app.description || '').replace(/<[^>]*>/g, ' '),
+            this.creatorName(app), ...this.getAppTypes(app), ...this.getAppMachines(app)]
+            .join(' ').toLowerCase();
+          return words.every((word) => text.includes(word));
         },
 
         filteredApps() {
           return this.apps.filter((app) => this.matchesSelectedFilters(app));
         },
 
+        // One card template serves both views: shelves to browse, or a single
+        // wrapping group of results while a filter is on.
+        views() {
+          if (!this.hasActiveFilters()) return this.shelves;
+          const apps = this.byStatus(this.filteredApps());
+          return [{ title: apps.length + (apps.length === 1 ? ' app' : ' apps'), apps, results: true }];
+        },
+
+        scrollShelf(button, direction) {
+          const track = button.closest('.shelf').querySelector('.shelf-track');
+          const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+          track.scrollBy({ left: direction * track.clientWidth * 0.85, behavior: still ? 'auto' : 'smooth' });
+        },
+
+        syncShelf(track) {
+          const shelf = track.closest('.shelf');
+          shelf.querySelector('.shelf-arrows').hidden = track.scrollWidth <= track.clientWidth;
+          shelf.querySelector('.shelf-prev').disabled = track.scrollLeft < 2;
+          shelf.querySelector('.shelf-next').disabled =
+            track.scrollLeft + track.clientWidth > track.scrollWidth - 2;
+        },
+
+        // The same monogram the store's cards use for an app without an icon.
+        hasIcon(app) {
+          return /^https:\/\//i.test(app.image || '') && !/placehold\.co/i.test(app.image);
+        },
+        initials(app) {
+          const parts = app.name.replace(/\(TEST\)/i, '').trim().split(/\s+/);
+          return (parts[1] ? parts[0][0] + parts[1][0] : parts[0].slice(0, 2)).toUpperCase();
+        },
+        monogram(app) {
+          let hue = 0;
+          for (const c of app.name) hue = (hue * 31 + c.charCodeAt(0)) % 360;
+          return `background:linear-gradient(135deg,hsl(${hue},42%,52%),hsl(${(hue + 40) % 360},42%,38%))`;
+        },
+
+        openDetail(app, opener) {
+          this.detail = app;
+          this.detailOpener = opener;
+          this.$nextTick(() => this.$refs.detailClose.focus());
+        },
+        // Keep Tab inside the open panel.
+        trapFocus(event) {
+          const items = [...event.currentTarget.querySelectorAll('a[href], button, select')]
+            .filter((item) => !item.disabled && item.offsetParent);
+          const edge = event.shiftKey ? items[0] : items[items.length - 1];
+          if (document.activeElement === edge) {
+            event.preventDefault();
+            (event.shiftKey ? items[items.length - 1] : items[0]).focus();
+          }
+        },
+        closeDetail() {
+          this.detail = null;
+          if (this.detailOpener) this.detailOpener.focus();
+        },
+
         // Trigger the modal for a specific UUID
         confirmRemove(uuid) {
           this.uuidToDelete = uuid;
           this.showDeleteModal = true;
-          console.log('Deleting app with uuid:', uuid);
         },
 
         // If user confirms, do the redirection
@@ -671,7 +657,6 @@
         confirmLaunch(uuid) {
           this.uuidToLaunch = uuid;
           this.showLaunchModal = true;
-          console.log('Launching app with uuid:', uuid);
         },
 
         // If the user confirms, launch the app
@@ -744,14 +729,15 @@
 <body x-data="appManager()" x-init="init()">
   <!-- Blue Banner Header -->
   <header class="header">
-    <h1><!--#TITLEHDR--></h1>
+    <h1><!--#TITLEH1--></h1>
     <!-- Manually stop the network scan to avoid overload the WiFi chip -->
     <!--#WLSTSTP-->
   </header>
 
   <!-- Navigation Bar -->
-  <nav class="nav-bar">
-    <div class="pure-menu pure-menu-horizontal">
+  <nav class="nav-bar" x-data="{ open: false }" @click.outside="open = false" @keydown.escape.window="open = false">
+    <button type="button" class="nav-toggle" :aria-expanded="open" @click="open = !open"><i class="fas fa-bars" aria-hidden="true"></i> Menu</button>
+    <div class="pure-menu pure-menu-horizontal" :class="{ 'nav-open': open }">
       <ul class="pure-menu-list">
         <li class="pure-menu-item pure-menu-selected">
           <a href="#" class="pure-menu-link">Apps</a>
@@ -779,7 +765,7 @@
   </nav>
 
   <!-- Main Content Area -->
-  <main class="main-content">
+  <main class="main-content main-apps">
     <!-- Informational banner if a new version is available -->
     <div class="banner banner-info" x-data="{ show: true }" x-show="'<!--#NVERSION-->' === 'Yes' && show" x-cloak>
       <i class="fas fa-info-circle banner-icon"></i>
@@ -804,29 +790,6 @@
         page, or delete the DEV APP.
       </span>
     </div>
-    <h2>Available Apps</h2>
-    <p>This page lists the micro-firmwares you can install, launch, or remove.</p>
-    <ul class="apps-help">
-      <li><strong>Release type</strong>: <strong>All</strong> lists everything. <strong>Stable</strong> hides beta versions, <strong>Beta</strong> shows only beta versions.</li>
-      <li><strong>Platform</strong>, <strong>Features</strong> and <strong>Creator</strong>: click the chips to filter the list. Combine filters to narrow the catalog.</li>
-      <li><strong>Action button</strong> (Install / Update / Downgrade): installs the version selected in the dropdown, latest by default. Downgrades ask for confirmation.</li>
-      <li><strong>Launch</strong>: starts an installed app. To return here later, press the <strong>SELECT</strong> button on the device and follow the on-screen instructions.</li>
-      <li x-show="devChannelSelected" x-cloak><strong>Restore and launch</strong> (DEV APP only): starts the DEV APP from a clean slate. It replaces the microfirmware on the device with the version downloaded from the catalog, erases the DEV APP's saved settings and deletes the last upload.</li>
-      <li x-show="devChannelSelected" x-cloak><strong>Restore config only</strong> (DEV APP only): erases the DEV APP's saved settings, so it starts with its defaults the next time it runs. The microfirmware on the device and the last upload are kept, and nothing is launched.</li>
-    </ul>
-    <div class="filter-group release-type-selector">
-      <span class="filter-group-title">Release type</span>
-      <div class="filter-chip-list">
-        <template x-for="releaseType in releaseTypes" :key="releaseType">
-          <button type="button" class="filter-chip"
-            :class="{ 'filter-chip-active': selectedReleaseType === releaseType }"
-            @click="selectedReleaseType = releaseType">
-            <span x-text="releaseTypeLabels[releaseType]"></span>
-          </button>
-        </template>
-      </div>
-    </div>
-
     <div class="banner banner-info loading-banner" x-show="!loaded_apps && !fetchError" x-cloak>
       <i class="fas fa-circle-notch fa-spin banner-icon"></i>
       <span>
@@ -834,67 +797,36 @@
       </span>
     </div>
 
-    <section class="filter-panel" x-show="loaded_apps" x-transition>
-      <div class="filter-groups">
-        <div class="filter-group" x-show="machineFilters.length > 0">
-          <span class="filter-group-title">Platform</span>
-          <div class="filter-chip-list">
-            <template x-for="machine in machineFilters" :key="machine.value">
-              <button type="button" class="filter-chip"
-                :class="{ 'filter-chip-active': isSelected('selectedMachines', machine.value) }"
-                @click="toggleSelection('selectedMachines', machine.value)">
-                <span x-text="machine.value"></span>
-                <span class="filter-chip-count" x-text="machine.count"></span>
-              </button>
-            </template>
-          </div>
-        </div>
-
-        <div class="filter-group" x-show="typeFilters.length > 0">
-          <span class="filter-group-title">Features</span>
-          <div class="filter-chip-list">
-            <template x-for="type in typeFilters" :key="type.value">
-              <button type="button" class="filter-chip"
-                :class="{ 'filter-chip-active': isSelected('selectedTypes', type.value) }"
-                @click="toggleSelection('selectedTypes', type.value)">
-                <span x-text="type.value"></span>
-                <span class="filter-chip-count" x-text="type.count"></span>
-              </button>
-            </template>
-          </div>
-        </div>
-
-        <div class="filter-group" x-show="creatorFilters.length > 0">
-          <span class="filter-group-title">Creator</span>
-          <div class="filter-chip-list">
-            <!-- The pill carries the styling but is not interactive itself: the
-                 filter toggle and the creator's site link are siblings inside it.
-                 An anchor nested in a button is invalid HTML and breaks keyboard
-                 order. The link is drawn only when the creator declares a url. -->
-            <template x-for="creator in creatorFilters" :key="creator.value">
-              <span class="filter-chip filter-chip-with-link"
-                :class="{ 'filter-chip-active': isSelected('selectedCreators', creator.value) }">
-                <button type="button" class="filter-chip-toggle"
-                  @click="toggleSelection('selectedCreators', creator.value)">
-                  <span x-text="creator.label"></span>
-                  <span class="filter-chip-count" x-text="creator.count"></span>
-                </button>
-                <template x-if="creator.url">
-                  <a class="filter-chip-link" :href="creator.url" target="_blank" rel="noopener"
-                    :aria-label="'Open the ' + creator.label + ' website in a new tab'"
-                    :title="'Open the ' + creator.label + ' website'"><i
-                      class="fas fa-up-right-from-square" aria-hidden="true"></i></a>
-                </template>
-              </span>
-            </template>
-          </div>
-        </div>
+    <section class="finder" x-show="loaded_apps" x-cloak>
+      <div class="finder-row">
+        <input class="finder-search" type="search" x-model="query" placeholder="Search apps"
+          aria-label="Search apps by name, description, tag or creator" />
+        <select x-model="machine" aria-label="Computer">
+          <option value="">Any computer</option>
+          <template x-for="m in machineFilters" :key="m.value">
+            <option :value="m.value" x-text="m.value"></option>
+          </template>
+        </select>
+        <select x-model="selectedReleaseType" aria-label="Release type">
+          <option value="all">Stable and beta</option>
+          <option value="stable">Stable only</option>
+          <option value="beta">Beta only</option>
+        </select>
+        <select x-model="creator" aria-label="Creator" x-show="creatorFilters.length > 1">
+          <option value="">Any creator</option>
+          <template x-for="c in creatorFilters" :key="c.value">
+            <option :value="c.value" x-text="c.label"></option>
+          </template>
+        </select>
       </div>
-
-      <div class="filter-actions" x-show="hasActiveFilters()">
-        <button class="filter-chip filter-chip-clear" type="button" @click="clearFilters()">
-          Clear Filters
-        </button>
+      <div class="finder-tags" x-show="tagFilters.length > 0">
+        <template x-for="t in tagFilters" :key="t.value">
+          <button type="button" class="filter-chip" :class="{ 'filter-chip-active': tag === t.value }"
+            :aria-pressed="tag === t.value" @click="tag = tag === t.value ? '' : t.value">
+            <span x-text="t.value"></span>
+            <span class="filter-chip-count" x-text="t.count"></span>
+          </button>
+        </template>
       </div>
     </section>
 
@@ -904,9 +836,6 @@
       <span>We couldn't detect a functional microSD card in the SD card slot. Please ensure you're using a microSD card
         formatted in exFAT or FAT32 and compatible with SDHC, SDXC, or SDUC standards. Once your card is ready, insert
         it and reset the device to try again.</span>
-      <button class="banner-close" aria-label="Close">
-        &times;
-      </button>
     </div>
 
     <!-- No apps found banner. Show only if there is no folder but the SD card is ready -->
@@ -914,9 +843,6 @@
       <i class="fas fa-exclamation-triangle banner-icon"></i> <!-- Warning Icon -->
       <span>The folder for storing micro-firmwares is missing. This usually indicates that the device cannot write to
         the microSD card. Please ensure the card is in read/write mode and try again.</span>
-      <button class="banner-close" aria-label="Close">
-        &times;
-      </button>
     </div>
 
     <!-- Warning banner for fetch error -->
@@ -953,128 +879,113 @@
   -->
 
 
-    <section class="app-list pure-g" x-show="loaded_apps" x-transition>
+    <div x-show="loaded_apps" x-cloak>
       <div class="banner banner-info filter-empty-state"
-        x-show="loaded_apps && !fetchError && apps.length === 0" x-cloak>
+        x-show="!fetchError && apps.length === 0">
         <i class="fas fa-info-circle banner-icon"></i>
         <span>
           This catalog has no micro-firmwares.
           <a href="/mngr_config.shtml">Pick a different one</a> in the Config page.
         </span>
       </div>
-      <div class="banner banner-info filter-empty-state"
-        x-show="loaded_apps && apps.length > 0 && filteredApps().length === 0" x-cloak>
-        <i class="fas fa-info-circle banner-icon"></i>
-        <span>No apps match the selected filters.</span>
-      </div>
-      <!-- Loop through apps -->
-      <template x-for="app in filteredApps()" :key="`${app.uuid}-${app.version}-${app.binary || app.name}`">
-        <div class="app-row pure-g" :class="{ 'update-available': app.update }">
+      <template x-for="shelf in views()" :key="shelf.title">
+        <section class="shelf" :class="{ 'shelf-results': shelf.results }">
+          <div class="shelf-head">
+            <h2>
+              <span x-text="shelf.title"></span>
+              <span class="shelf-count" x-show="!shelf.results" x-text="shelf.apps.length"></span>
+            </h2>
+            <button type="button" class="link-button" x-show="shelf.results" @click="clearFilters()">Clear filters</button>
+            <span class="shelf-arrows" x-show="!shelf.results">
+              <button type="button" class="shelf-prev" aria-label="Earlier apps" disabled @click="scrollShelf($el, -1)"><i class="fas fa-chevron-left" aria-hidden="true"></i></button>
+              <button type="button" class="shelf-next" aria-label="Later apps" @click="scrollShelf($el, 1)"><i class="fas fa-chevron-right" aria-hidden="true"></i></button>
+            </span>
+          </div>
+          <p class="shelf-empty" x-show="shelf.apps.length === 0">No apps match. Try fewer words or clear the filters.</p>
+          <div class="shelf-track" x-init="$nextTick(() => syncShelf($el))" @scroll.passive="syncShelf($el)" @resize.window="syncShelf($el)">
+            <template x-for="app in shelf.apps" :key="`${app.uuid}-${app.version}-${app.binary || app.name}`">
+              <article class="cart" :class="{ 'cart-update': app.update, 'cart-dim': !app.installed }">
+                <button type="button" class="cart-open" tabindex="-1" aria-hidden="true" @click="openDetail(app, $el)"></button>
+                <div class="cart-label">
+                  <template x-if="hasIcon(app)"><img :src="app.image" alt="" loading="lazy" /></template>
+                  <template x-if="!hasIcon(app)"><span class="cart-monogram" :style="monogram(app)" x-text="initials(app)"></span></template>
+                </div>
+                <h3 x-text="app.name"></h3>
+                <p class="cart-note" x-text="app.update ? displayVersion(app.version) + ' available' : (creatorName(app) || displayVersion(app.version))"></p>
+                <div class="cart-actions">
+                <button type="button" class="cart-action pure-button" x-show="app.installed" @click="confirmLaunch(app.uuid)">Launch</button>
+                <button type="button" class="cart-action pure-button pure-button-primary" x-show="!app.installed" :disabled="app.busy" @click="performAction(app.uuid)" x-text="app.busy ? actionLabel(app, true) : 'Install'"></button>
+                <button type="button" class="cart-info" :title="(app.update ? 'Update available. ' : '') + 'Details of ' + app.name" @click="openDetail(app, $el)"><i class="fas" :class="app.update ? 'fa-exclamation' : 'fa-info'" aria-hidden="true"></i></button>
+                </div>
+              </article>
+            </template>
+          </div>
+        </section>
+      </template>
+    </div>
 
-          <!-- Left-hand side: App Image (1/6 on md) -->
-          <!--
-        <div class="pure-u-1 pure-u-md-1-6 app-image">
-          <a :href="app.image" target="_blank">
-            <img :src="app.image" alt="App Image" class="app-thumbnail" />
-          </a>
-        </div>
--->
-          <!-- Middle: App Details (2/3 on md) -->
-          <div class="pure-u-1 pure-u-md-2-3 app-details">
-            <!-- App Name -->
-            <h3 x-text="app.name"></h3>
-            <h4>
-              <span x-text="displayVersion(app.selectedVersion ? app.selectedVersion.version : app.version)"></span>
-              <template x-if="app.installed && app.installedVersion && app.selectedVersion && app.installedVersion !== app.selectedVersion.version">
-                <span class="installed-version-note" x-text="'(installed: ' + displayVersion(app.installedVersion) + ')'"></span>
-              </template>
-            </h4>
-            <!-- Creator: hidden entirely when the catalog carries none -->
-            <template x-if="creatorName(app)">
-              <p class="app-creator">by <span x-text="creatorName(app)"></span></p>
+    <!-- One panel for every app: the controls are not repeated per card. -->
+    <div class="sheet" x-show="detail" x-cloak @keydown.escape.window="if (detail && !showDeleteModal && !showLaunchModal && !showRestoreModal && !showRestoreConfigModal && !showDowngradeModal) closeDetail()">
+      <div class="sheet-overlay" @click="closeDetail()"></div>
+      <template x-if="detail">
+        <div class="sheet-panel" role="dialog" aria-modal="true" :aria-label="detail.name" @keydown.tab="trapFocus($event)">
+          <button type="button" class="sheet-close" x-ref="detailClose" aria-label="Close" @click="closeDetail()"><i class="fas fa-times" aria-hidden="true"></i></button>
+          <h2 x-text="detail.name"></h2>
+          <p class="sheet-meta">
+            <span x-text="displayVersion(detail.selectedVersion ? detail.selectedVersion.version : detail.version)"></span>
+            <template x-if="detail.installed && detail.installedVersion && detail.selectedVersion && detail.installedVersion !== detail.selectedVersion.version">
+              <span x-text="'(installed: ' + displayVersion(detail.installedVersion) + ')'"></span>
             </template>
-            <template x-if="app.installed && app.settingsOnCard">
-              <p class="settings-on-card"
-                 title="Information only: the app gets these settings back the next time you launch it">
-                <i class="fas fa-info-circle" aria-hidden="true"></i>
-                Settings kept on the microSD card
-              </p>
+            <template x-if="creatorName(detail)">
+              <span>by <a x-show="creatorUrl(appCreatorId(detail))" :href="creatorUrl(appCreatorId(detail))" target="_blank" rel="noopener" x-text="creatorName(detail)"></a><span x-show="!creatorUrl(appCreatorId(detail))" x-text="creatorName(detail)"></span></span>
             </template>
-            <!-- Version selector: only when more than one version is published -->
-            <template x-if="app.allVersions && app.allVersions.length > 1">
-              <div class="version-selector">
-                <label :for="'version-' + app.uuid">Version:</label>
-                <select :id="'version-' + app.uuid"
-                        :disabled="app.busy"
-                        @change="onVersionChange(app, $event.target.value)">
-                  <template x-for="(v, idx) in app.allVersions" :key="v.version">
-                    <option :value="v.version"
-                            :selected="app.selectedVersion && app.selectedVersion.version === v.version"
-                            x-text="versionOptionLabel(app, v, idx)"></option>
-                  </template>
-                </select>
-              </div>
-            </template>
-            <!-- App Description -->
-            <p x-html="safeDescription(app.description)"></p>
-            <!-- Combined Tags in one line -->
-            <div class="tags-row">
-              <!-- App Tags -->
-              <ul class="app-tags">
-                <template x-for="tag in getAppTypes(app)" :key="tag">
-                  <li x-text="tag"></li>
+          </p>
+          <template x-if="detail.installed && detail.settingsOnCard">
+            <p class="settings-on-card"
+               title="Information only: the app gets these settings back the next time you launch it">
+              <i class="fas fa-info-circle" aria-hidden="true"></i>
+              Settings kept on the microSD card
+            </p>
+          </template>
+          <p class="sheet-description" x-html="safeDescription(detail.description)"></p>
+          <ul class="app-tags">
+            <template x-for="t in getAppTypes(detail)" :key="t"><li x-text="t"></li></template>
+          </ul>
+          <ul class="device-tags">
+            <template x-for="d in getAppMachines(detail)" :key="d"><li x-text="d"></li></template>
+          </ul>
+          <template x-if="detail.allVersions && detail.allVersions.length > 1">
+            <div class="version-selector">
+              <label :for="'version-' + detail.uuid">Version:</label>
+              <select :id="'version-' + detail.uuid" :disabled="detail.busy"
+                      @change="onVersionChange(detail, $event.target.value)">
+                <template x-for="(v, idx) in detail.allVersions" :key="v.version">
+                  <option :value="v.version"
+                          :selected="detail.selectedVersion && detail.selectedVersion.version === v.version"
+                          x-text="versionOptionLabel(detail, v, idx)"></option>
                 </template>
-              </ul>
-              <!-- Device Tags -->
-              <ul class="device-tags">
-                <template x-for="device in getAppMachines(app)" :key="device">
-                  <li x-text="device"></li>
-                </template>
-              </ul>
+              </select>
             </div>
-          </div>
-
-          <!-- Right-hand side: Buttons (1/6 on md) -->
-          <div class="pure-u-1 pure-u-md-1-6 app-actions">
-            <!-- Dynamic action button: Install / Update / Downgrade. Hidden when the
-                 selected version is already installed (status === 'reinstall'). -->
+          </template>
+          <div class="sheet-actions">
             <button class="pure-button pure-button-primary"
-                    :class="{ 'button-downgrade': versionStatus(app) === 'downgrade' }"
-                    :disabled="app.busy"
-                    x-show="versionStatus(app) !== 'reinstall'"
-                    @click="performAction(app.uuid)"
-                    x-text="actionLabel(app, app.busy)"></button>
-
-            <!-- Launch button: only visible if installed is true -->
-            <button class="pure-button" x-show="app.installed" @click="confirmLaunch(app.uuid)">
-              Launch
-            </button>
-
-            <!-- Restore and launch: DEV APP only, and only once installed -->
-            <button class="pure-button" x-show="app.installed && app.uuid === devAppUuid"
-                    @click="confirmRestore(app.uuid)">
-              Restore and launch
-            </button>
-
-            <!-- Restore config only: DEV APP only, and only once installed -->
-            <button class="pure-button" x-show="app.installed && app.uuid === devAppUuid"
-                    @click="confirmRestoreConfig(app.uuid)">
-              Restore config only
-            </button>
-
-            <!-- Delete button: only visible if installed is true -->
-            <button class="pure-button button-delete" x-show="app.installed" @click="confirmRemove(app.uuid)">
-              Delete
-            </button>
+                    :class="{ 'button-downgrade': versionStatus(detail) === 'downgrade' }"
+                    :disabled="detail.busy"
+                    x-show="versionStatus(detail) !== 'reinstall'"
+                    @click="performAction(detail.uuid)"
+                    x-text="actionLabel(detail, detail.busy)"></button>
+            <button class="pure-button" x-show="detail.installed" @click="confirmLaunch(detail.uuid)">Launch</button>
+            <button class="pure-button" x-show="detail.installed && detail.uuid === devAppUuid" @click="confirmRestore(detail.uuid)">Restore and launch</button>
+            <button class="pure-button" x-show="detail.installed && detail.uuid === devAppUuid" @click="confirmRestoreConfig(detail.uuid)">Restore config only</button>
+            <button class="pure-button button-delete" x-show="detail.installed" @click="confirmRemove(detail.uuid)">Delete</button>
           </div>
-
         </div>
       </template>
-    </section>
+    </div>
 
     <!-- The confirmation modal (hidden by default) -->
     <!-- x-cloak hides the element until Alpine is fully loaded -->
-    <div class="modal" x-show="showDeleteModal" x-cloak x-transition>
+    <div class="modal" x-show="showDeleteModal" x-cloak>
       <!-- A simple dark overlay behind the modal -->
       <div class="modal-overlay" @click="showDeleteModal=false"></div>
 
@@ -1097,7 +1008,7 @@
     </div>
 
     <!-- Downgrade confirmation modal -->
-    <div class="modal" x-show="showDowngradeModal" x-cloak x-transition>
+    <div class="modal" x-show="showDowngradeModal" x-cloak>
       <div class="modal-overlay" @click="showDowngradeModal=false"></div>
 
       <div class="modal-content">
@@ -1123,7 +1034,7 @@
 
     <!-- Restore config only for the DEV APP (hidden by default). Its x-show name
          is allowlisted in styles.css, like every dialog. -->
-    <div class="modal" x-show="showRestoreConfigModal" x-cloak x-transition>
+    <div class="modal" x-show="showRestoreConfigModal" x-cloak>
       <div class="modal-overlay" @click="if (!restoreConfigBusy) showRestoreConfigModal = false"></div>
 
       <div class="modal-content">
@@ -1153,7 +1064,7 @@
     </div>
 
     <!-- Restore and launch confirmation for the DEV APP (hidden by default) -->
-    <div class="modal" x-show="showRestoreModal" x-cloak x-transition>
+    <div class="modal" x-show="showRestoreModal" x-cloak>
       <div class="modal-overlay" @click="showRestoreModal = false"></div>
 
       <div class="modal-content">
@@ -1179,7 +1090,7 @@
 
     <!-- The information modal (hidden by default) -->
     <!-- x-cloak hides the element until Alpine is fully loaded -->
-    <div class="modal" x-show="showLaunchModal" x-cloak x-transition>
+    <div class="modal" x-show="showLaunchModal" x-cloak>
       <!-- A simple dark overlay behind the modal -->
       <div class="modal-overlay" @click="showLaunchModal = false"></div>
 
