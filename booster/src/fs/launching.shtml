@@ -79,7 +79,7 @@
 <body>
   <!-- Blue Banner Header -->
   <header class="header">
-    <h1><!--#TITLEHDR--></h1>
+    <h1><!--#TITLEH1--></h1>
   </header>
 
   <main class="main-content-full-width">

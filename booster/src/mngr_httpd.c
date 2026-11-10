@@ -201,7 +201,7 @@ static const char *ssi_tags[] = {
     "DEVMODE",   // 20 - Developer deploy API enabled
     "DLSTAT",    // 21 - Download progress JSON (was PLHLDR12)
     "DLNAME",    // 22 - Name of the app being installed (was PLHLDR13)
-    "PLHLDR14",  // 23 - Placeholder 14
+    "TITLEH1",   // 23 - Page heading, version in <small> (was PLHLDR14)
     "PLHLDR15",  // 24 - Placeholder 15
     "PLHLDR16",  // 25 - Placeholder 16
     "PLHLDR17",  // 26 - Placeholder 17
@@ -1392,6 +1392,17 @@ static u16_t ssi_handler(int iIndex, char *pcInsert, int iInsertLen
       char name[65];
       snprintf(name, sizeof(name), "%s", appmngr_get_app_info()->name);
       printed = (int)textescape_js(pcInsert, (size_t)iInsertLen, name);
+      break;
+    }
+    case 23: /* TITLEH1 */
+    {
+#if _DEBUG == 0
+      printed = snprintf(pcInsert, iInsertLen, "%s <small>(%s)</small>",
+                         BOOSTER_TITLE, RELEASE_VERSION);
+#else
+      printed = snprintf(pcInsert, iInsertLen, "%s <small>(%s-%s)</small>",
+                         BOOSTER_TITLE, RELEASE_VERSION, RELEASE_DATE);
+#endif
       break;
     }
     default: /* unknown tag */

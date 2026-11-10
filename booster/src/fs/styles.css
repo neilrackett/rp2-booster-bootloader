@@ -36,9 +36,12 @@ html, body {
   .header {
     background-color: #0078e7;
     color: #fff;
-    padding: 1em;
+    padding: .5em 1em;
     text-align: center;
   }
+
+  .header h1 { margin: .25em 0; font-size: clamp(1rem, 5vw, 2em); }
+  .header small { font-size: .55em; font-weight: 400; }
   
   /* ---------- Navigation Bar ---------- */
   .nav-bar {
@@ -62,6 +65,20 @@ html, body {
     color: #fff;
   }
   
+  /* On a phone the menu is one line that opens over the page. */
+  .nav-toggle { display: none; }
+  @media (max-width: 600px) {
+    .nav-bar { position: relative; }
+    .nav-toggle { display: block; width: 100%; padding: .6em 1em; border: 0; background: #fff; color: #333; font: inherit; text-align: left; cursor: pointer; }
+    .nav-bar .pure-menu { display: none; position: absolute; top: 100%; left: 0; right: 0; z-index: 800; background: #fff; box-shadow: 0 4px 8px rgba(0, 0, 0, .25); }
+    .nav-bar .nav-open { display: block; }
+    .system-section, .footer { box-sizing: border-box; }
+    .main-content, .main-content-full-width { box-sizing: border-box; width: 100%; min-width: 0; }
+    select { max-width: 100%; }
+    .item-inner { grid-template-columns: 7.5rem minmax(0, 1fr); }
+    .value-cell { overflow-wrap: anywhere; }
+  }
+
   /* ---------- Responsive Menu (Pure) ---------- */
   @media (max-width: 600px) {
     .pure-menu-horizontal {
@@ -177,14 +194,6 @@ html, body {
     color: #ff9800; /* Example warning orange */
 }
 
-.text-success {
-    color: #4caf50; /* Example success green */
-}
-
-.text-info {
-    color: #2196f3; /* Example info blue */
-}
-
 /* General Banner Styling */
 .banner {
   padding: 1rem;
@@ -242,35 +251,6 @@ html, body {
   margin-right: 0.5rem;
 }
 
-.filter-panel {
-  margin-bottom: 1.5rem;
-  padding: 0;
-}
-
-.filter-groups {
-  display: grid;
-  gap: 1rem;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-}
-
-.filter-group {
-  min-width: 0;
-}
-
-.filter-group-title {
-  color: #1f2937;
-  display: block;
-  font-size: 0.95rem;
-  font-weight: bold;
-  margin-bottom: 0.6rem;
-}
-
-.filter-chip-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-}
-
 .filter-chip {
   align-items: center;
   background: #eef4fb;
@@ -307,168 +287,8 @@ html, body {
   text-align: center;
 }
 
-/* Creator pill with an outbound link. The pill is a non-interactive wrapper: the
-   filter toggle and the link are separate controls inside it, so neither nests in
-   the other. */
-.filter-chip-with-link {
-  cursor: default;
-  gap: 0.15rem;
-  padding-right: 0.3rem;
-}
-
-.filter-chip-toggle {
-  align-items: center;
-  background: none;
-  border: 0;
-  color: inherit;
-  cursor: pointer;
-  display: inline-flex;
-  font: inherit;
-  gap: 0.45rem;
-  padding: 0;
-}
-
-.filter-chip-link {
-  align-items: center;
-  border-radius: 999px;
-  color: inherit;
-  display: inline-flex;
-  font-size: 0.78em;
-  justify-content: center;
-  margin-left: 0.1rem;
-  /* small glyph, but a tap target that clears ~24px */
-  min-height: 24px;
-  min-width: 24px;
-  opacity: 0.62;
-  text-decoration: none;
-  transition: background-color 0.14s ease, opacity 0.14s ease;
-}
-
-.filter-chip-link:hover,
-.filter-chip-link:focus-visible {
-  background: rgba(30, 58, 95, 0.12);
-  opacity: 1;
-}
-
-.filter-chip-active .filter-chip-link:hover,
-.filter-chip-active .filter-chip-link:focus-visible {
-  background: rgba(255, 255, 255, 0.25);
-}
-
-.filter-chip-toggle:focus-visible,
-.filter-chip-link:focus-visible {
-  outline: 2px solid currentColor;
-  outline-offset: 1px;
-}
-
 .filter-empty-state {
   width: 100%;
-}
-
-.filter-actions {
-  margin-top: 0.9rem;
-}
-
-.filter-chip-clear {
-  background: transparent;
-  border-color: #93c5fd;
-  color: #0078e7;
-}
-
-.filter-chip-clear:hover {
-  background: #dbeafe;
-  border-color: #60a5fa;
-}
-
-/* App List Styling */
-.app-list {
-  padding: 0rem;
-  margin: 0rem;
-  width: 100%;
-}
-
-.app-row {
-  margin-top: 1rem;
-  margin-bottom: 1rem;
-  padding-left: 0;
-  padding-right: 0;
-  padding-bottom: 1rem;
-  padding-top: 1rem;
-  width: 100%;
-  align-items: center;
-}
-
-.app-row:nth-child(odd) {
-  background-color: #ffffff; /* White background for odd rows */
-}
-
-/* .app-row:nth-child(even) {
-  background-color: #f4f4f9; /* Light gray for even rows */
-} */
-
-.app-image {
-  flex: 0 0 auto; /* Fixed width for image container */
-  text-align: center;
-}
-
-.app-thumbnail {
-  width: 100%;
-  max-width: 256px;
-  height: auto;
-  border-radius: 4px;
-  object-fit: cover;
-}
-
-/* Middle: App Details */
-.app-details {
-  flex: 1 1 auto; /* Flexible size for middle panel */
-  overflow: hidden; /* Prevent overflow for long text */
-}
-
-.app-details h3 {
-  display: inline-block;
-  margin-left: 0rem;
-  margin-right: 1rem;
-  margin-top: 0.2rem;
-  margin-bottom: 0.5rem;
-  font-size: 1.2rem;
-  color: #333;
-}
-
-.app-details h4 {
-  display: inline-block;
-  margin: 0;
-  font-size: 0.9rem;
-  color: #333;
-  font-family: "Courier New", Courier, monospace;
-  font-weight: bold;
-}
-
-
-.app-details p {
-  margin-top: 0;
-  margin-left: 0rem;
-  margin-right: 1rem;
-  margin-bottom: 1rem;
-  font-size: 1rem;
-  color: #555;
-}
-
-.app-row.update-available {
-    background-color: #ffe6e6; /* light red */
-  }
-
-.tags-row {
-  display: flex;       /* Put both lists on one line */
-  flex-wrap: wrap;     /* Let them wrap if screen is too narrow */
-  padding-bottom: 1rem;
-}
-
-.tags-row ul {
-  margin: 0;           /* Remove extra margin so they line up */
-  padding: 0;
-  display: flex;       /* Keep each list’s items in a row */
-  gap: 0.25rem;         /* Spacing between each tag */
 }
 
 ul.app-tags {
@@ -509,43 +329,21 @@ ul.device-tags li {
   font-size: 0.7rem;
 }
 
-/* Right-hand side: Buttons */
-.app-actions {
-  flex: 0 0 auto; /* Fixed size for button container */
-  display: flex;
-  flex-direction: column; /* Stack buttons vertically */
-  gap: 0.5rem;
-  justify-content: center; /* or center, space-between, etc. */
-  align-items: flex-start;     /* how to align horizontally */
-}
-
-.app-actions .pure-button {
-  width: 100%;
-  white-space: normal;
-  word-break: break-word;
-  overflow-wrap: anywhere;
-  line-height: 1.2;
-  padding: 0.4em 0.6em;
-  min-height: 2.2em;
-}
-
-.app-actions .button-delete {
+.button-delete, .pure-button-warning {
   background-color: #e57373;
   color: white;
 }
 
-.app-actions .button-delete:hover {
+.button-delete:hover, .pure-button-warning:hover {
   background-color: #c62828;
 }
 
-.app-actions .button-downgrade,
-.modal-buttons .button-downgrade {
+.button-downgrade {
   background-color: #f0ad4e;
   color: #fff;
 }
 
-.app-actions .button-downgrade:hover,
-.modal-buttons .button-downgrade:hover {
+.button-downgrade:hover {
   background-color: #d18c2b;
 }
 
@@ -562,82 +360,34 @@ ul.device-tags li {
   font-size: 0.85rem;
 }
 
-.installed-version-note {
-  font-size: 0.8rem;
-  font-weight: normal;
-  color: #777;
-  margin-left: 0.4rem;
-}
-
 /* An installed app whose settings were moved to the card to free a slot.
    Information only: small and grey, so it never reads as a warning.
    Needs .app-details in the selector to win over .app-details p. */
-.app-details .settings-on-card {
+.settings-on-card {
   font-size: 0.75rem;
   color: #888;
   margin: 0 0 0.6rem 0;
 }
 
-.app-details .settings-on-card i {
+.settings-on-card i {
   font-size: 0.7rem;
   margin-right: 0.25rem;
 }
 
-.app-creator {
-  font-size: 0.85rem;
-  color: #777;
-  margin: 0 0 0.4rem 0;
-}
 
-.release-type-selector {
-  margin: 0.5rem 0 1rem;
-}
-
-@media (max-width: 600px) {
-  .filter-chip-list {
-    gap: 0.4rem;
-  }
-}
 
 [x-cloak] { 
   display: none !important; 
 }
 
-/* Every .modal is hidden here, and only the dialogs listed below by their
-   x-show variable are allowed to appear. A new dialog must be added to this
-   list, or Alpine opens it and it stays invisible: the button looks dead. */
+/* A dialog carries x-show and x-cloak: Alpine decides when it appears. */
 .modal {
   position: fixed;
   top: 0; left: 0; right: 0; bottom: 0;
-  display: none;
+  display: flex;
   align-items: center;
   justify-content: center;
   z-index: 999; /* Above everything else */
-}
-
-.modal[x-show="showDeleteModal"] {
-  display: flex;
-}
-.modal[x-show="showLaunchModal"] {
-  display: flex;
-}
-.modal[x-show="showRestoreModal"] {
-  display: flex;
-}
-.modal[x-show="showRestoreConfigModal"] {
-  display: flex;
-}
-.modal[x-show="showDowngradeModal"] {
-  display: flex;
-}
-.modal[x-show="showInfoModal"] {
-  display: flex;
-}
-.modal[x-show="showErrorModal"] {
-  display: flex;
-}
-.modal[x-show="showConfirmationModal"] {
-  display: flex;
 }
 
 .modal-overlay {
@@ -697,15 +447,6 @@ ul.device-tags li {
 /* Table row hover effect */
 table.pure-table.pure-table-bordered tbody tr:hover {
   background-color: #e0f0ff; /* Light blue on hover */
-}
-
-.pure-button-warning {
-  background-color: #e57373; /* Light red */
-  color: white;
-}
-
-.pure-button-warning:hover {
-  background-color: #c62828; /* Dark red */
 }
 
 /* Download / firmware-update progress page */
@@ -814,3 +555,64 @@ table.pure-table.pure-table-bordered tbody tr:hover {
 .locked button {
   cursor: not-allowed;
 }
+
+/* ---------- Apps page: finder, shelves and cartridges ---------- */
+.main-apps { width: 100%; min-width: 0; box-sizing: border-box; }
+.finder { margin-bottom: .5rem; }
+.finder-row { display: flex; flex-wrap: wrap; gap: .5rem; }
+.finder-row input, .finder-row select { padding: .5rem; border: 1px solid #bbb; border-radius: 4px; font: inherit; background: #fff; max-width: 100%; }
+.finder-search { flex: 1 1 14rem; min-width: 0; }
+.finder-tags { display: flex; gap: .4rem; overflow-x: auto; padding: .6rem 0 .3rem; }
+.finder-tags .filter-chip { flex: none; }
+
+.shelf { margin-top: 1.25rem; }
+.shelf-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.shelf-head h2 { margin: 0; font-size: 1.1rem; }
+.shelf-count { color: #777; font-weight: 400; margin-left: .25rem; }
+.shelf-arrows button { width: 2rem; height: 2rem; border: 1px solid #bbb; border-radius: 4px; background: #fff; cursor: pointer; margin-left: .25rem; color: #333; }
+.shelf-arrows button:disabled { opacity: .35; cursor: default; }
+.shelf-empty { color: #555; }
+.link-button { background: none; border: 0; padding: 0; color: #0078e7; cursor: pointer; font: inherit; text-decoration: underline; }
+.shelf-track { display: flex; gap: .75rem; overflow-x: auto; scroll-snap-type: x proximity; padding: .75rem 2px 1.1rem; }
+.shelf-results .shelf-track { flex-wrap: wrap; overflow: visible; }
+@media (hover: none) { .shelf-arrows { display: none; } }
+
+/* An ST cartridge: putty shell, ridged grip, and the edge connector below. */
+.cart { transition: transform .15s; position: relative; flex: none; width: 9.25rem; scroll-snap-align: start; display: flex; flex-direction: column; padding: 14px .6rem .6rem; box-sizing: border-box; --shell: #d8d4c4; --ridge: #b3ae99; background: repeating-linear-gradient(90deg, var(--ridge) 0 2px, var(--shell) 2px 6px) top / 100% 8px no-repeat, var(--shell); border-radius: 6px 6px 2px 2px; box-shadow: inset 0 0 0 1px var(--ridge); }
+.cart::after { transition: height .15s, bottom .15s; content: ""; position: absolute; left: 22%; right: 22%; bottom: -6px; height: 6px; background: repeating-linear-gradient(90deg, #b8912e 0 3px, #8f8a76 3px 5px); border-radius: 0 0 2px 2px; }
+.cart-update { --shell: #eab5a8; --ridge: #c9796a; }
+.cart-update::after { background: #c0341d; }
+.cart-update .cart-info { color: #c0341d; border-color: #c0341d; }
+.cart-dim { --shell: #ededed; --ridge: #d4d4d4; }
+.cart-dim::after { filter: grayscale(1); }
+.cart-dim img, .cart-dim .cart-monogram { filter: grayscale(1) opacity(.65); }
+.cart-open { position: absolute; inset: 0; width: 100%; background: none; border: 0; border-radius: inherit; cursor: pointer; }
+.cart:focus-within { transform: translateY(-5px); }
+.cart:focus-within::after { bottom: -11px; height: 11px; }
+@media (hover: hover) {
+  .cart:hover { transform: translateY(-5px); }
+  .cart:hover::after { bottom: -11px; height: 11px; }
+  .cart-dim:hover img, .cart-dim:hover .cart-monogram { filter: none; }
+}
+@media (prefers-reduced-motion: reduce) { .cart, .cart::after { transition: none; } }
+.cart-label { height: 5.5rem; background: #fff; border-radius: 2px; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.cart-label img { width: 100%; height: 100%; object-fit: contain; }
+.cart-monogram { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 1.75rem; font-weight: 700; }
+.cart h3 { margin: .45rem 0 .1rem; font-size: .9rem; line-height: 1.2; height: 2.4em; overflow: hidden; }
+.cart-note { margin: 0 0 .45rem; font-size: .75rem; color: #555; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cart-update .cart-note { color: #7a1c0c; }
+.cart-actions { position: relative; display: flex; gap: .3rem; margin-top: auto; }
+.cart-action { flex: 1; min-width: 0; padding: .35rem 0; font-size: .85rem; }
+.cart-info { flex: none; width: 1.9rem; padding: 0; background: #fff; border: 1px solid #b3ae99; border-radius: 2px; color: #333; cursor: pointer; }
+.cart-info:focus-visible, .shelf-arrows button:focus-visible, .cart-action:focus-visible { outline: 3px solid #0078e7; outline-offset: 1px; }
+
+.sheet { position: fixed; inset: 0; z-index: 900; display: flex; justify-content: flex-end; }
+.sheet-overlay { position: absolute; inset: 0; background: rgba(0, 0, 0, .45); }
+.sheet-panel { position: relative; width: min(28rem, 100%); max-height: 100%; overflow-y: auto; box-sizing: border-box; padding: 1.25rem; background: #fff; }
+.sheet-panel h2 { margin: 0 2rem .25rem 0; }
+.sheet-close { position: absolute; top: .75rem; right: .75rem; width: 2rem; height: 2rem; border: 0; background: none; font-size: 1.1rem; cursor: pointer; color: #333; }
+.sheet-meta { margin: 0; color: #555; font-size: .9rem; }
+.sheet-meta span ~ span::before { content: " "; }
+.sheet-panel ul, .sheet-panel ul.device-tags { padding: 0; margin: .5rem 0; }
+.sheet-panel .version-selector { margin-top: .75rem; }
+.sheet-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: 1rem; }

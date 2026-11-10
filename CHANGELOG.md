@@ -13,6 +13,9 @@ Firmware only. Any number of apps now keep their settings, and a long list of fi
 - **Any number of apps keep their settings.** The device has 30 settings slots, and the catalogs already list 30 apps. An app now takes a slot the first time it is launched, not when it is installed, and when all 30 are in use, launching another app moves the settings of the app launched least recently to the microSD card (`<uuid>.cfg` in the apps folder). That app gets them back the next time it is launched. Microfirmwares need no update. The DEV APP keeps its slot while the Development catalog is selected. See [Settings of each app](README.md#settings-of-each-app).
 - **Apps page:** an app whose settings are on the card says so, in small grey text under its name.
 - **Atari:** the app list shows 18 apps per page; press `N` and `P` to change page, and type any app's number to launch it.
+- **A new Apps page for a growing catalog.** Apps are now cartridges on shelves, one shelf per topic, so many more fit on screen. A search box, dropdowns for computer, release type and creator, and chips for the most used tags replace the long lists of filters; each filter now takes one choice. Each cartridge has one main button, and its description, versions and other actions open in a panel.
+- **Cartridge colours show each app's state.** Grey is not installed, the ST's putty colour is installed, and reddish with an exclamation mark means an update is available. Apps with an update come first, then the other installed apps.
+- **The web interface fits phones.** The menu folds behind a **Menu** button and opens over the page, the title takes one line with a smaller version number, and pages are no longer wider than the screen.
 
 ### Fixes
 
