@@ -2,7 +2,7 @@
 
 ## v2.5.0 (unreleased)
 
-Firmware only. Any number of apps now keep their settings, and a long list of fixes makes launching apps, downloads, firmware updates and the web interface harder to break.
+Firmware only. A new Apps page shows the growing catalog as cartridges on shelves, any number of apps now keep their settings, and a long list of fixes makes launching apps, downloads, firmware updates and the web interface harder to break.
 
 ### Before you upgrade
 - **As with every firmware update, the app in the device is replaced by the placeholder.** It's still on the microSD card: launch it again.
