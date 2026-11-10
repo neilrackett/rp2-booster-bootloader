@@ -24,7 +24,7 @@
 
   <script>
     // /.wificonf on the microSD card re-applies the WiFi network and the TCP/IP
-    // settings at every boot (EPIC-10). While it is there those two sections
+    // settings at every boot. While it is there those two sections
     // are read-only here, and the firmware refuses their saves as well. The
     // value comes from the firmware's own file check, not from anything the
     // page infers.

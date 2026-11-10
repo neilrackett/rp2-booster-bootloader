@@ -34,7 +34,7 @@ static download_err_t headers_refused = DOWNLOAD_OK;
 static char request_host_buf[256];
 static char request_uri_buf[1536];
 
-// --- Redirect following (EPIC-08) -------------------------------------
+// --- Redirect following -------------------------------------
 // A 30x is detected in the headers callback, which aborts the body so no
 // redirect page is ever written to the destination file, and records the
 // target. appmngr_poll_download_app() re-issues from the main loop, once the
@@ -601,7 +601,7 @@ static err_t http_client_header_check_size_fn(
   }
 
   // Redirects: record the target and abort the body. The re-issue happens in
-  // appmngr_poll_download_app() from the main loop (EPIC-08).
+  // appmngr_poll_download_app() from the main loop.
   if (http_status == 301 || http_status == 302 || http_status == 303 ||
       http_status == 307 || http_status == 308) {
     if (redirect_hops >= APPMNGR_MAX_REDIRECT_HOPS) {
@@ -1179,7 +1179,7 @@ download_err_t appmngr_verify_firmware_md5(void) {
                         sizeof(expected_fw_md5));
 
   // Integrity, not authenticity: the digest travels from the same host over
-  // the same unauthenticated TLS connection as the image (decision D-01), so
+  // the same unauthenticated TLS connection as the image, so
   // it catches truncation and corruption, not substitution.
   if (memcmp(expected_fw_md5, md5_ctx.digest, sizeof(expected_fw_md5)) != 0) {
     DPRINTF("Firmware MD5 mismatch: refusing to flash\n");
@@ -1915,7 +1915,7 @@ download_delete_err_t appmngr_delete_app(const char *uuid) {
   f_unlink(binary_filename);
 
   // The development app can also have a deploy API upload beside its catalog
-  // binary (D-10). Deleting the app is the documented way back to the probe
+  // binary. Deleting the app is the documented way back to the probe
   // workflow, so the upload goes too.
   if (strcmp(uuid, DEVAPI_DEV_APP_UUID) == 0) {
     char upload_filename[sizeof(binary_filename)] = {0};
@@ -2075,17 +2075,17 @@ download_launch_err_t appmngr_launch_app() {
   //  1. Probe workflow: the developer put the microfirmware in the slot
   //     themselves, with a debug probe or the USB/BOOTSEL dance. Launching must
   //     leave the slot alone, or it destroys exactly what they wanted to run.
-  //  2. Deploy API upload (EPIC-05): <uuid>.dev.uf2. That file IS what the
+  //  2. Deploy API upload: <uuid>.dev.uf2. That file IS what the
   //     developer wants to run, so it is flashed like any other app.
   //  3. Catalog binary: <uuid>.uf2, written when the DEV APP is installed from
   //     the Development channel, which the deploy API requires. A plain launch
-  //     never flashes it (D-10). "Restore and launch" on the Apps page does, on
+  //     never flashes it. "Restore and launch" on the Apps page does, on
   //     purpose, after deleting the upload and erasing the app's config.
   //
   // Uploads used to be written over <uuid>.uf2, so cases 2 and 3 looked the
   // same: from v2.3.0 to v2.4.1, launching with the DEV APP installed flashed
   // the placeholder over a probe-flashed microfirmware, and the placeholder
-  // handed straight back to Booster (EPIC-11).
+  // handed straight back to Booster.
   bool isDevApp = strcmp(launch_app_uuid, DEVAPI_DEV_APP_UUID) == 0;
   bool flashIt = true;
   const char *flash_filename = binary_filename;
@@ -2546,9 +2546,9 @@ download_err_t appmngr_finish_download_app() {
   // wrote match what the catalog said to expect, so it catches truncation and
   // corruption. It is not a signature. The expected hash arrives from the same
   // catalog, over the same connection, as the binary itself, and TLS here is
-  // encryption-only (ALTCP_MBEDTLS_AUTHMODE = VERIFY_NONE, decision D-01), so
+  // encryption-only (ALTCP_MBEDTLS_AUTHMODE = VERIFY_NONE), so
   // an attacker able to substitute the download can substitute the hash with
-  // it. Real authenticity needs D-01 phase B (verified certificates) or a
+  // it. Real authenticity needs verified certificates or a
   // signed catalog.
   if (memcmp(app_info.md5, app_info.file_md5_digest, sizeof(app_info.md5)) !=
       0) {

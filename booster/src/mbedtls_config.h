@@ -10,13 +10,13 @@
 // Asymmetric TLS record buffers. The IN buffer MUST be the full 16KB, and
 // this is now confirmed from both directions rather than assumed:
 //
-//   - 8192 was tried (EPIC-08, 2026-08-16) to free heap for the TLS 1.2
+//   - 8192 was tried (2026-08-16) to free heap for the TLS 1.2
 //     ECDHE-RSA handshake. The handshake then fit, but EVERY download failed
 //     with DOWNLOAD_HTTP_ERROR: servers send bulk data in records up to the
 //     16KB protocol maximum, mbedTLS cannot receive a record larger than this
 //     buffer, so the first big record killed the connection mid-transfer and
 //     lwIP reported it as a content-length mismatch.
-//   - With 4KB (EPIC-01) the handshake already died on real certificate
+//   - With 4KB the handshake already died on real certificate
 //     chains.
 //
 // So this buffer cannot fund the handshake's memory. The RSA-2048
@@ -34,7 +34,7 @@
 // (mbedtls_ssl_session.start only exists with it). Millisecond time comes from
 // mbedtls_ms_time.c (time since boot). There is still NO wall-clock source:
 // MBEDTLS_HAVE_TIME_DATE stays off, so certificate validity periods cannot be
-// checked (constraint C-02, decision D-01).
+// checked.
 #define MBEDTLS_HAVE_TIME
 #define MBEDTLS_PLATFORM_C
 // The app provides mbedtls_ms_time() (mbedtls_ms_time.c, ms since boot)

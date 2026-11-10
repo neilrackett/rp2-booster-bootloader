@@ -31,7 +31,7 @@
 
 // Credentials collected by the factory web form. The .wificonf path does
 // not go through this struct any more: wificonf.c applies the file straight
-// into the settings (EPIC-10).
+// into the settings.
 typedef struct {
   char ssid[MAX_SSID_LENGTH];
   char pass[MAX_PASSWORD_LENGTH];

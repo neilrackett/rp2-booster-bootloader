@@ -3,7 +3,7 @@
  * Author: Diego Parrilla Santamaría
  * Date: July 2026
  * Copyright: 2026 - GOODDATA LABS SL
- * Description: Minimal deploy API for microfirmware developers (EPIC-05)
+ * Description: Minimal deploy API for microfirmware developers
  *
  * Lets a developer push a .uf2 over WiFi and run it, instead of needing a
  * debug probe or the USB/BOOTSEL dance.
@@ -30,8 +30,8 @@
  * is open can write code that runs on the cartridge, and the UI is served over
  * plain http so there is nothing to sniff-proof it. The gate makes the
  * exposure deliberate and visible; it does not make it safe. Do not describe
- * it as secure in user-facing text (compare D-01, which states the TLS trust
- * model plainly rather than overclaiming).
+ * it as secure in user-facing text (the notes on TLS in lwipopts.h state its
+ * trust model the same way, plainly rather than overclaiming).
  */
 
 #ifndef DEVAPI_H
@@ -64,7 +64,7 @@
  * Uploads used to be renamed over <uuid>.uf2, the file installing the DEV APP
  * from the catalog writes. The two could not be told apart, so launching with
  * the DEV APP installed flashed the catalog placeholder over a probe-flashed
- * microfirmware (EPIC-11, D-10). A name of its own keeps the upload and the
+ * microfirmware. A name of its own keeps the upload and the
  * placeholder distinct, and a catalog reinstall, which only replaces the .json
  * and the .uf2, leaves the upload alone.
  */
@@ -73,7 +73,7 @@
 /**
  * @brief The only catalog URL that opens the gate.
  *
- * Exact match, deliberately, the same rule D-06 uses for catalog migration. A
+ * Exact match, deliberately, the same rule the catalog URL migration uses. A
  * custom catalog URL does not open the gate even if it serves the DEV APP,
  * because "the Development channel is selected" has to mean one specific
  * thing to be stateable in the docs.
@@ -123,7 +123,7 @@ devapi_err_t devapi_uploadBegin(int contentLength);
  * @brief Feed one pbuf chain to the in-flight upload.
  *
  * Writes straight through to the SD card and never accumulates: the heap is
- * about 44KB (D-03) and a microfirmware .uf2 runs past 1MB, so buffering the
+ * about 44KB and a microfirmware .uf2 runs past 1MB, so buffering the
  * body is not an option. The caller still owns @p p.
  */
 devapi_err_t devapi_uploadData(struct pbuf *p);

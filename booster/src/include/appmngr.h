@@ -372,12 +372,12 @@ download_catalog_err_t appmngr_create_app_catalog();
 void appmngr_schedule_launch_app(const char *uuid);
 
 /**
- * @brief Schedule "Restore and launch" for the development app (EPIC-11).
+ * @brief Schedule "Restore and launch" for the development app.
  *
  * Like appmngr_schedule_launch_app(), but when the launch runs it first
  * deletes the deploy API upload and erases the development app's config
  * sector, then flashes the binary downloaded from the catalog, even though a
- * plain launch of the development app never flashes that binary (D-10). It
+ * plain launch of the development app never flashes that binary. It
  * gives a developer a clean slate after a bad deploy. The web page is the
  * only caller, and it only ever passes DEVAPI_DEV_APP_UUID.
  */
@@ -391,7 +391,7 @@ typedef enum {
 
 /**
  * @brief Erase an installed app's config sector, so the microfirmware starts
- * from its defaults the next time it runs (EPIC-11).
+ * from its defaults the next time it runs.
  *
  * The lookup table entry stays: the sector remains assigned to the app. Used
  * by "Restore and launch" and "Restore config only" for the development app.

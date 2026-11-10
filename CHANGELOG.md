@@ -2,11 +2,14 @@
 
 ## v2.5.0 (unreleased)
 
-_In development. Sections below are filled in as epics land and finalised at tag time._
+Firmware only. A new Apps page shows the growing catalog as cartridges on shelves, any number of apps now keep their settings, and a long list of fixes makes launching apps, downloads, firmware updates and the web interface harder to break.
+
+### Before you upgrade
+- **As with every firmware update, the app in the device is replaced by the placeholder.** It's still on the microSD card: launch it again.
+- **Settings of apps past the 30th live on the microSD card.** When all 30 slots in flash are in use, the settings of the app launched least recently move to the card, as `<uuid>.cfg` in the apps folder, and come back the next time that app is launched. They travel with the card, so keep the card with the device.
 
 ### New features
 - **News in the web interface menu.** The menu at the top of the Apps, Network and Config pages now ends with **News**, to the right of **Report Issue**. It opens the [SidecarTridge news channel on Telegram](https://t.me/s/sidecartridgenews) in a new tab.
-
 - **Any number of apps keep their settings.** The device has 30 settings slots, and the catalogs already list 30 apps. An app now takes a slot the first time it is launched, not when it is installed, and when all 30 are in use, launching another app moves the settings of the app launched least recently to the microSD card (`<uuid>.cfg` in the apps folder). That app gets them back the next time it is launched. Microfirmwares need no update. The DEV APP keeps its slot while the Development catalog is selected. See [Settings of each app](README.md#settings-of-each-app).
 - **Apps page:** an app whose settings are on the card says so, in small grey text under its name.
 - **Atari:** the app list shows 18 apps per page; press `N` and `P` to change page, and type any app's number to launch it.
@@ -15,46 +18,57 @@ _In development. Sections below are filled in as epics land and finalised at tag
 - **The web interface fits phones.** The menu folds behind a **Menu** button and opens over the page, the title takes one line with a smaller version number, and pages are no longer wider than the screen.
 
 ### Fixes
-- **A 31st app could overwrite the device's settings.** The 31st app was given the flash sector of the app list itself, and the 32nd the sector of the WiFi and boot settings; the first time such an app saved its settings, it overwrote them. Slots are now bounded, and a device that went past 30 apps repairs its app list at the next start.
-- **The app list survives a power cut while it is being saved.** A copy is kept on the microSD card (`.lookup` in the apps folder) and put back at the next start if the copy in flash was cut short.
+
+#### Launching apps
 - **A launch could hang the device.** Rarely, launching an app froze Booster while it stopped the network. Fixed.
 - **A failed launch no longer retries forever,** and the Atari screen says why it failed.
 - **A failed copy no longer boots a half-copied app.** Launching an app copies it from the microSD card into the device. A card error partway through was reported as success, and the device rebooted into whatever the copy had left. Now the Atari screen says "Launch failed" and the device restarts into Booster, so the app can be launched again.
 - **A power cut while an app is being copied no longer leaves the device unable to start.** Until the copy has finished, the device starts Booster instead of the app being copied. Before, a cut during the copy left a device that only a USB reflash could recover.
+- **The Atari did not reset after a launch while a key was held down.** The device restarted into the new app, but the Atari kept running the app list against it. Booster now keeps answering the Atari until it has seen the reset.
+
+#### App settings
+- **A 31st app could overwrite the device's settings.** The 31st app was given the flash sector of the app list itself, and the 32nd the sector of the WiFi and boot settings; the first time such an app saved its settings, it overwrote them. Slots are now bounded, and a device that went past 30 apps repairs its app list at the next start.
+- **The app list survives a power cut while it is being saved.** A copy is kept on the microSD card (`.lookup` in the apps folder) and put back at the next start if the copy in flash was cut short.
+
+#### Firmware updates
 - **A firmware update that is cut short no longer leaves a device that does not start.** The installer now checks the whole update file before it writes anything, writes the new Booster first and reads it back, and only then replaces itself. If the power is cut or the microSD card cannot be read during the install, power the device on again with the same card: the install starts over. A file that cannot be read in full is refused, and the current firmware keeps running.
 - **The installer reads the microSD card at the speed set in Booster,** so a card that needed a lower speed no longer fails during the one step that cannot be undone.
 - **No "Firmware update available" banner for an error page.** When the update check got a web page instead of a version (a 404 served as a page, a captive portal's login), the numbers in it were taken as the version, and the banner offered an update that does not exist.
 - **Installing the full firmware image by drag and drop now finishes.** The image carried one stray byte at the address of the first app's settings, and the device did not restart by itself after the copy. The settings are no longer in the image.
-- **A malformed web request could hang the device.** A parameter sent without a value (`/download.cgi?json`), or a request with no parameters, made several pages read through a null pointer, and the device froze until it was powered off. Every page now checks its parameters and answers with the reason.
-- **Errors from the Apps page are shown again.** When an install, a launch or a delete was refused, the browser got no answer at all and showed a blank or broken page. The device now answers with a page that says what went wrong.
-- **An app ID can no longer reach files outside the apps folder.** Deleting an app accepted any 36-character text as its ID, so a crafted request such as `../../../../../../../../../../../xyz` from the local network could delete `.json` and `.uf2` files anywhere on the microSD card. The same went for an app ID in a catalog. Only a real app ID is accepted now.
-- **The WiFi password is no longer written to the debug log,** only its length.
-- **A catalog can no longer run code in the web interface.** App descriptions were shown as they came, so a description with an `<img onerror=…>` in a custom catalog, or one changed on its way to the device, ran script in the device's own pages. Descriptions now keep only their text, links to `http`/`https` addresses and bold or italic text.
-- **An app name with a quote no longer breaks the install page.** A name such as *Diego's Floppy* ended the script string it was put in, and the page stayed on "Installing" forever. The same applied to the catalog URL and to WiFi network names in the network list, which a nearby access point chooses.
+- **A firmware update right after a release no longer fails on a stale copy.** The update check, the update file and its checksum could come from a cached copy of the previous release, so the device hid the update or refused it with a checksum error for hours. Each request now gets past the cache.
+
+#### Downloads and catalogs
 - **A failed download now says so.** When a server refused the file, the connection dropped, or the download could not start, the install or upgrade page could stay on "Connecting" or "Downloading" for good. Every failure now ends on the error page with its reason.
 - **One download at a time.** A second install started from another tab, a Retry or Cancel pressed while a download was running, or a firmware update started during an install, could mix two downloads into one file or close it under the transfer. The device now refuses them until the running download ends.
 - **A catalog entry without a checksum is refused** instead of being downloaded and then rejected as "checksum mismatch".
 - **A file sent in chunks is refused with that reason** instead of failing at the checksum.
-- **The setup network now gives phones the whole address of the setup page.** It sent only its first three letters.
-- **A crafted request during WiFi setup can no longer write past a network buffer.**
-- **A firmware update right after a release no longer fails on a stale copy.** The update check, the update file and its checksum could come from a cached copy of the previous release, so the device hid the update or refused it with a checksum error for hours. Each request now gets past the cache.
-- **Offline mode no longer freezes the device.** After three failed WiFi attempts the device stopped responding, the Atari screen stayed as it was, and holding SELECT did nothing.
-- **First-time WiFi setup no longer loses memory.** Each password sent during setup, and each address given out on the setup network, kept a little memory until the next restart. Enough attempts in one session could make setup stop responding.
+- **A catalog can no longer run code in the web interface.** App descriptions were shown as they came, so a description with an `<img onerror=…>` in a custom catalog, or one changed on its way to the device, ran script in the device's own pages. Descriptions now keep only their text, links to `http`/`https` addresses and bold or italic text.
+- **An app name with a quote no longer breaks the install page.** A name such as *Diego's Floppy* ended the script string it was put in, and the page stayed on "Installing" forever. The same applied to the catalog URL and to WiFi network names in the network list, which a nearby access point chooses.
+
+#### Web interface
+- **A malformed web request could hang the device.** A parameter sent without a value (`/download.cgi?json`), or a request with no parameters, made several pages read through a null pointer, and the device froze until it was powered off. Every page now checks its parameters and answers with the reason.
+- **Errors from the Apps page are shown again.** When an install, a launch or a delete was refused, the browser got no answer at all and showed a blank or broken page. The device now answers with a page that says what went wrong.
+- **An app ID can no longer reach files outside the apps folder.** Deleting an app accepted any 36-character text as its ID, so a crafted request such as `../../../../../../../../../../../xyz` from the local network could delete `.json` and `.uf2` files anywhere on the microSD card. The same went for an app ID in a catalog. Only a real app ID is accepted now.
+- **The WiFi password is no longer written to the debug log,** only its length.
+
+#### WiFi and network
 - **A typo in the static IP settings no longer takes the device off the network.** The Network page stored whatever was typed and the device applied it at the next boot. The address, netmask, gateway and DNS servers are now checked when you click **Save**: if one is not valid, the page names it and nothing is saved, not even the other fields. Valid values are stored in their clean form.
 - **A static IP address no longer reports "connected" before WiFi has joined.** With a wrong password the device showed the connected screen and started its services, and never retried or fell back to offline mode. It now waits for the real connection, as it does with DHCP, and retries before going offline. Access points that report a refused password end the attempt at once with "Wrong WiFi password".
+- **Offline mode no longer freezes the device.** After three failed WiFi attempts the device stopped responding, the Atari screen stayed as it was, and holding SELECT did nothing.
+- **First-time WiFi setup no longer loses memory.** Each password sent during setup, and each address given out on the setup network, kept a little memory until the next restart. Enough attempts in one session could make setup stop responding.
+- **The setup network now gives phones the whole address of the setup page.** It sent only its first three letters.
+- **A crafted request during WiFi setup can no longer write past a network buffer.**
+
+#### Atari terminal
 - **A program reading the cartridge could corrupt Booster's memory.** Booster took the size of each command from the Atari as given, so a program that reads the cartridge's ROM area in sequence, or noise on the bus, could make it write up to 64 KB past its command buffer. Commands larger than the buffer are now dropped.
 - **Typing a large app number on the Atari could crash the device.** A number such as 65536 was checked as 0 but used in full. Any number past the last app now says "Invalid app number".
-- **The Atari did not reset after a launch while a key was held down.** The device restarted into the new app, but the Atari kept running the app list against it. Booster now keeps answering the Atari until it has seen the reset.
 - **A keystroke on the Atari could be lost and leave it waiting.** Booster cleared its "command received" flag after answering, so a key the Atari sent right after the answer could be dropped.
 
+### Known issues
+- **Downloads are encrypted but certificates are not checked,** as in earlier versions. The device has no list of trusted certificates and no clock, so a checksum protects against a damaged file but not against someone able to change what the device downloads.
+
 ### For developers
-- **Host tests.** `make -C tests/host test` checks the firmware's parsers, the apps lookup table and the time conversions on the computer, in seconds, under the address and undefined-behaviour sanitizers; it also runs on every pull request. `make -C tests/host known-bugs` lists the defects that are not fixed yet.
-- **Debug Probe tools.** `tools/dev/` builds, flashes and verifies Booster over a Raspberry Pi Debug Probe, tells which build the device runs, captures the Atari screen and the debug console, and prints both cores' backtraces from a hung device. `tools/dev/testserver.py` serves catalogs and failing downloads for testing. See [tools/dev/README.md](tools/dev/README.md).
-- **The deploy API answers a failed upload with an error status.** A refused or failed upload was answered with status 200, so `curl --fail` took it for a success. Now a refusal is a 400 and an upload that could not be saved a 500, as is a launch request without a valid app ID. See [docs/DEPLOY-API.md](docs/DEPLOY-API.md).
-- **Test a firmware upgrade end to end before publishing.** `tools/dev/dnsredirect.py` answers the update host with your computer's address, so a device on any published version takes the real upgrade path against `tools/dev/testserver.py`. The steps are in [tools/dev/README.md](tools/dev/README.md).
-- **The installer's debug log works.** A debug build of the upgrader never printed anything; it now logs at 921,600 baud like Booster.
-- **Drive the Atari terminal from the Debug Probe.** In a debug build, `tools/dev/swd.py key` types into the Atari terminal, `inject` sends any terminal command, and `bus` feeds raw words to the cartridge command parser, so the terminal can be tested with no one at the Atari.
-- **Builds on a Mac fit like CI's.** Built with the Arm GNU toolchain, Booster was 26 KB bigger than the released firmware and a debug build did not fit its flash slot. Both now match CI's within about 1 KB, and the released firmware itself is 12 KB smaller. The debug console runs at 921,600 baud, as in the microfirmwares.
+- Host tests (`make -C tests/host test`) and Debug Probe tools in `tools/dev/`: build, flash, console, screen capture, typing into the Atari terminal, and an end-to-end firmware upgrade test with `dnsredirect.py`. The installer's debug log works, local builds now match CI's size, and the deploy API answers a failed upload with a 400 or 500, so `curl --fail` catches it.
 
 ---
 
