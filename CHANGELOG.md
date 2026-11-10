@@ -1,6 +1,6 @@
 # Changelog
 
-## v2.5.0 (unreleased)
+## v2.5.0 (2026-11-10) - release
 
 Firmware only. A new Apps page shows the growing catalog as cartridges on shelves, any number of apps now keep their settings, and a long list of fixes makes launching apps, downloads, firmware updates and the web interface harder to break.
 
