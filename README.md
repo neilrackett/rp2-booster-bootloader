@@ -17,7 +17,7 @@ This is an advanced second-stage bootloader for the Raspberry Pi Pico W and the 
   Store and manage files on a micro SD card, allowing apps to use external storage or turn the device into a file server.  
 
 - **Catalog Filters in the Apps View**  
-  Narrow the app catalog with Release type, Platform, Features and Creator filters so it is easier to find the right microfirmware.  
+  Browse apps as cartridges on shelves by topic, or find one by search, computer, release type, creator or tag. Colours show at a glance which apps are installed and which have an update.  
 
 - **Catalog Channel Selector**  
   Choose the catalog on the Config page: **Stable** for tested releases (the default), **Testing** for unstable releases, **Development** for microfirmware developers, or a custom catalog URL.  
@@ -345,7 +345,7 @@ In **Manager mode**, the Booster app tries to connect to your configured WiFi ne
 
 If your network supports `.local` name resolution, you can access the web interface using `http://sidecart.local`. Otherwise, use the IP address shown on the Atari ST screen: the one assigned by your DHCP server, or the static address set on the [Network view](#network-view) or in a [`.wificonf` file](#configuring-wifi-from-a-file).
 
-The menu at the top of the web interface opens the [Apps](#apps-view), [Network](#network-view) and [Config](#config-view) views. Its last three items open in a new tab: **Help** goes to the online documentation, **Report Issue** to the page for reporting a problem, and **News** to the [SidecarTridge news channel on Telegram](https://t.me/s/sidecartridgenews). The [Upgrade view](#upgrade-view) is not in the menu: it opens from the banner shown when a new firmware version is available.
+The menu at the top of the web interface opens the [Apps](#apps-view), [Network](#network-view) and [Config](#config-view) views. On a phone it is folded behind a **Menu** button and opens over the page. Its last three items open in a new tab: **Help** goes to the online documentation, **Report Issue** to the page for reporting a problem, and **News** to the [SidecarTridge news channel on Telegram](https://t.me/s/sidecartridgenews). The [Upgrade view](#upgrade-view) is not in the menu: it opens from the banner shown when a new firmware version is available.
 
 If WiFi retries are exhausted, Booster falls back to an **offline Manager mode**. In that state network features are disabled, but the Atari ST terminal remains available so you can still boot already-downloaded microfirmwares manually.
 
@@ -361,20 +361,27 @@ The **Apps view** shows:
 - The list of installed apps on the device.
 - The list of apps that are not installed but are available on the microSD card.
 
-This view is the default view when you access the web interface. It lists the catalog selected on the [Config view](#config-view). At the top of the page, the **Release type** chips (**All**, **Stable**, **Beta**) filter the list already loaded, without changing the catalog, and the **Platform**, **Features** and **Creator** chips narrow it further. While the catalog is being fetched, a loading indicator is shown.
+This view is the default view when you access the web interface. It lists the catalog selected on the [Config view](#config-view). Apps are shown as cartridges on shelves, one shelf per topic. Apps with an update come first, then the other installed apps. Swipe a shelf or use its arrows to see more.
+
+To find an app, type in the search box: it looks in the names, descriptions, tags and creators. The dropdowns narrow the list by computer, release type and creator, and the chips pick one of the tags shared by several apps. While a filter is on, the shelves become a single list of the matching apps, and **Clear filters** brings the shelves back.
 
 ![Booster Manager Apps View 1](/docs/BOOSTER-MANAGER-APPS-1.png)
 
-Each app shows the following information:
+The colour of a cartridge shows the state of the app:
+- **Grey**: not installed.
+- **Putty, the colour of the Atari ST**: installed.
+- **Reddish, with an exclamation mark**: installed, and a newer version is available.
+
+Each cartridge has one main button: **Install**, or **Launch** if the app is installed. Select the cartridge, or its **i** or exclamation mark button, to open the app's panel, which shows:
 - **Name**: The name of the app.
 - **Version**: The version of the app.
 - **Description**: A short description of the app.
 - **Features**: A list of features supported by the app as a taxonomy.
 - **Computer**: The computers supported by the app as a taxonomy.
 
-If the catalog publishes more than one version of an app, a **Version** dropdown appears under the app name. The latest version is selected by default; older versions, when available, are listed in semantic-version order. The currently installed version is tagged "(current)" when it is not the latest.
+If the catalog publishes more than one version of an app, a **Version** dropdown appears in the panel. The latest version is selected by default; older versions, when available, are listed in semantic-version order. The currently installed version is tagged "(current)" when it is not the latest.
 
-At the right hand side of each app, you can see the following buttons:
+The panel has the following buttons:
 - **Install vX / Update to vX / Downgrade to vX**: A single context-aware action button that installs the version selected in the dropdown. Its label and color reflect what the action will do relative to what is already installed. The button is hidden when the selected version is the one already installed. Downgrading to an older version requires an extra confirmation.
 - **Delete**: Delete the app from the device microSD card. You can download the app again if you want to.
 
