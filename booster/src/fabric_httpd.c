@@ -8,7 +8,9 @@
 
 #include "fabric_httpd.h"
 
+#include "cgiparam.h"
 #include "devapi.h"
+#include "mngr_httpd.h"
 
 #define WIFI_PASS_BUFSIZE 64
 static char *ssid = NULL;
@@ -16,8 +18,10 @@ static char pass[WIFI_PASS_BUFSIZE];
 static int auth = -1;
 static void *current_connection;
 static void *valid_connection;
-// Non-NULL while a developer .uf2 upload owns the POST body (EPIC-05).
+// Non-NULL while a developer .uf2 upload owns the POST body.
 static void *uploadConnection = NULL;
+// An upload whose body failed partway: its finish answers with an error.
+static void *uploadFailedConnection = NULL;
 static fabric_httpd_callback_t set_config_callback;
 static fabric_httpd_served_callback_t set_served_callback = NULL;
 
@@ -88,16 +92,20 @@ const char *cgi_test(int iIndex, int iNumParams, char *pcParam[],
 static const char *cgi_network_select(int iIndex, int iNumParams,
                                       char *pcParam[], char *pcValue[]) {
   DPRINTF("cgi_network_select called with index %d\n", iIndex);
-  for (size_t i = 0; i < iNumParams; i++) {
-    /* check if parameter is "id" */
-    if (strcmp(pcParam[i], "id") == 0) {
-      DPRINTF("Network selected: %s\n", pcValue[i]);
-      wifi_scan_data_t *wifi_nets = network_getFoundNetworks();
-      ssid = wifi_nets->networks[atoi(pcValue[i])].ssid;
-      auth = wifi_nets->networks[atoi(pcValue[i])].auth_mode;
-      DPRINTF("Network name: %s. Auth: %i\n", ssid, auth);
-    }
+  // The id is an index into the networks found by the last scan: anything
+  // else goes back to the list instead of reading past it.
+  const char *id = cgiparam_get("id", iNumParams, pcParam, pcValue);
+  wifi_scan_data_t *wifi_nets = network_getFoundNetworks();
+  char *end = NULL;
+  long index = (id != NULL) ? strtol(id, &end, 10) : -1;
+  if (id == NULL || end == id || *end != '\0' || index < 0 ||
+      index >= wifi_nets->count) {
+    DPRINTF("Invalid network id: %s\n", id != NULL ? id : "(none)");
+    return "/ap_step1.shtml";
   }
+  ssid = wifi_nets->networks[index].ssid;
+  auth = wifi_nets->networks[index].auth_mode;
+  DPRINTF("Network name: %s. Auth: %i\n", ssid, auth);
   return "/ap_step2.shtml";
 }
 
@@ -275,7 +283,7 @@ err_t httpd_post_begin(void *connection, const char *uri,
   LWIP_UNUSED_ARG(post_auto_wnd);
   DPRINTF("POST request for URI: %s\n", uri);
 
-  // Developer deploy API (EPIC-05). These POST callbacks are lwIP globals --
+  // Developer deploy API. These POST callbacks are lwIP globals --
   // one set for the whole binary -- so the manager-mode upload is dispatched
   // here alongside the fabric-mode password form. devapi_uploadBegin()
   // enforces the gate; nothing is written if it refuses.
@@ -287,6 +295,10 @@ err_t httpd_post_begin(void *connection, const char *uri,
     devapi_err_t derr = devapi_uploadBegin(content_len);
     if (derr != DEVAPI_OK) {
       DPRINTF("Upload rejected: %d\n", derr);
+      // lwIP answers a refused POST with the page named here, so a script
+      // sees a real error status (curl --fail) instead of a closed socket.
+      snprintf(response_uri, response_uri_len, "%s",
+               derr == DEVAPI_NO_SDCARD ? "/500.shtml" : "/400.shtml");
       return ERR_VAL;
     }
     uploadConnection = connection;
@@ -322,6 +334,7 @@ err_t httpd_post_receive_data(void *connection, struct pbuf *p) {
     pbuf_free(p);
     if (derr != DEVAPI_OK) {
       uploadConnection = NULL;
+      uploadFailedConnection = connection;
       current_connection = NULL;
       return ERR_ABRT;
     }
@@ -342,23 +355,23 @@ err_t httpd_post_receive_data(void *connection, struct pbuf *p) {
         len_pass = p->tot_len - value_pass;
       }
       if ((len_pass > 0) && (len_pass < WIFI_PASS_BUFSIZE)) {
-        /* provide contiguous storage if p is a chained pbuf */
+        // Always a copy: the terminator below must not land in the pbuf, where
+        // it could fall one byte past a full segment.
         char buf_pass[WIFI_PASS_BUFSIZE];
-        char *rawPass = (char *)pbuf_get_contiguous(
-            p, buf_pass, sizeof(buf_pass), len_pass, value_pass);
-        rawPass[len_pass] = '\0';
-        DPRINTF("Password raw: %s\n", rawPass);
-        if (rawPass) {
-          bool valid = url_decode(rawPass, pass, len_pass + 1);
+        if (pbuf_copy_partial(p, buf_pass, len_pass, value_pass) == len_pass) {
+          buf_pass[len_pass] = '\0';
+          bool valid = url_decode(buf_pass, pass, len_pass + 1);
           DPRINTF("Bad encoding: %s\n", valid ? "No" : "Yes");
           valid_connection = connection;
-          DPRINTF("Password: %s\n", pass);
+          DPRINTF("Password: %u characters\n", (unsigned)strlen(pass));
         }
       }
     }
+    pbuf_free(p);  // lwIP leaves the received pbuf to this callback
     return ERR_OK;
   }
   DPRINTF("POST data received for invalid connection\n");
+  pbuf_free(p);
   return ERR_VAL;
 }
 
@@ -369,9 +382,20 @@ void httpd_post_finished(void *connection, char *response_uri,
     uploadConnection = NULL;
     current_connection = NULL;
     // The caller is a script, not a browser, so the distinction that matters
-    // is only "did the bytes land".
+    // is only "did the bytes land", told by the HTTP status: error.shtml was
+    // a 200, and curl --fail took a failed upload for a good one.
+    if (derr == DEVAPI_OK) {
+      mngr_httpd_setResponse(MNGR_HTTPD_RESPONSE_OK, "Uploaded");
+    }
     snprintf(response_uri, response_uri_len,
-             derr == DEVAPI_OK ? "/response.shtml" : "/error.shtml");
+             derr == DEVAPI_OK ? "/response.shtml" : "/500.shtml");
+    return;
+  }
+  if (uploadFailedConnection == connection) {
+    // The upload failed while its body was arriving: answer for it, not as
+    // the factory WiFi form below.
+    uploadFailedConnection = NULL;
+    snprintf(response_uri, response_uri_len, "/500.shtml");
     return;
   }
   snprintf(response_uri, response_uri_len, "/ap_step2.shtml");

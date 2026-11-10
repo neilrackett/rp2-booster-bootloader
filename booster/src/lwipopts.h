@@ -211,13 +211,13 @@
 #define MEMP_NUM_ALTCP_PCB 10
 #define LWIP_ALTCP_TLS 1
 #define LWIP_ALTCP_TLS_MBEDTLS 1
-// TRUST MODEL (decision D-01, phase A): encryption only, NOT authentication.
+// TRUST MODEL: encryption only, NOT authentication.
 // VERIFY_NONE means no certificate chain is checked, so an HTTPS download is
 // protected against passive eavesdropping but NOT against an active
 // man-in-the-middle. Two things block verification today: there is no CA
-// bundle on the device, and there is no wall clock (constraint C-02,
-// MBEDTLS_HAVE_TIME_DATE off) so certificate validity periods are uncheckable.
-// Phase B would add a CA store for sidecartridge.com hosts, VERIFY_REQUIRED,
+// bundle on the device, and there is no wall clock
+// (MBEDTLS_HAVE_TIME_DATE off) so certificate validity periods are uncheckable.
+// Verifying would need a CA store for sidecartridge.com hosts, VERIFY_REQUIRED,
 // and a time source. Do not describe this as "secure" in user-facing text.
 #define ALTCP_MBEDTLS_AUTHMODE MBEDTLS_SSL_VERIFY_NONE
 // #define ALTCP_MBEDTLS_DEBUG  LWIP_DBG_ON

@@ -17,6 +17,13 @@ while($file = <FILES>) {
     open(HEADER, "> /tmp/header") || die $!;
     if($file =~ /404/) {
 	print(HEADER "HTTP/1.0 404 File not found\r\n");
+    } elsif($file =~ /\/400[._]/) {
+	# lwIP's own page for a bad request (400.shtml), and the Manager's answer
+	# to a request it refuses (400_refused.shtml)
+	print(HEADER "HTTP/1.0 400 Bad Request\r\n");
+    } elsif($file =~ /\/500\./) {
+	# the deploy API's answer when the device could not save an upload
+	print(HEADER "HTTP/1.0 500 Internal Server Error\r\n");
     } else {
 	print(HEADER "HTTP/1.0 200 OK\r\n");
     }

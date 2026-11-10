@@ -8,7 +8,10 @@
 
 #include "mngr_httpd.h"
 
+#include "cgiparam.h"
 #include "devapi.h"
+#include "textescape.h"
+#include "uuid.h"
 
 #define WIFI_PASS_BUFSIZE 64
 static char *ssid = NULL;
@@ -195,10 +198,10 @@ static const char *ssi_tags[] = {
     "APPSURL",   // 17 - Apps Catalog URL
     "NVERSION",  // 18 - New Version
     "NVERSTR",   // 19 - New Version String
-    "DEVMODE",   // 20 - Developer deploy API enabled (EPIC-05)
+    "DEVMODE",   // 20 - Developer deploy API enabled
     "DLSTAT",    // 21 - Download progress JSON (was PLHLDR12)
     "DLNAME",    // 22 - Name of the app being installed (was PLHLDR13)
-    "PLHLDR14",  // 23 - Placeholder 14
+    "TITLEH1",   // 23 - Page heading, version in <small> (was PLHLDR14)
     "PLHLDR15",  // 24 - Placeholder 15
     "PLHLDR16",  // 25 - Placeholder 16
     "PLHLDR17",  // 26 - Placeholder 17
@@ -228,6 +231,25 @@ static const char *ssi_tags[] = {
     "WSIGNAL",   // 50 - Live WiFi signal strength
     "WIFICONF",  // 51 - /.wificonf on the SD card locks the Network page
 };
+
+void mngr_httpd_setResponse(mngr_httpd_response_status_t status,
+                            const char *message) {
+  response_status = status;
+  snprintf(httpd_response_message, sizeof(httpd_response_message), "%s",
+           message != NULL ? message : "");
+}
+
+// The answer to a request the Manager refuses: the reason and its code, shown
+// by 400_refused.shtml, with a 400 status so a script using curl --fail sees
+// the refusal. lwIP opens the page a handler returns exactly as
+// given, query included, so "/error.shtml?error=..." found no file and the
+// browser got no answer at all.
+static const char *mngr_httpd_refuse(const char *reason, int code) {
+  response_status = MNGR_HTTPD_RESPONSE_BAD_REQUEST;
+  snprintf(httpd_response_message, sizeof(httpd_response_message), "%s (%d)",
+           reason, code);
+  return "/400_refused.shtml";
+}
 
 /**
  * @brief
@@ -259,57 +281,50 @@ static const char *cgi_test(int iIndex, int iNumParams, char *pcParam[],
 const char *cgi_download(int iIndex, int iNumParams, char *pcParam[],
                          char *pcValue[]) {
   DPRINTF("cgi_download called with index %d\n", iIndex);
-  bool update = false;
-  for (size_t i = 0; i < iNumParams; i++) {
-    /* check if parameter is "update" */
-    if (strcmp(pcParam[i], "update") == 0) {
-      DPRINTF("Update flag found, value: %s\n", pcValue[i]);
-      if (starts_with_case_insensitive(pcValue[i], "YyTt")) {
-        update = true;
-      } else {
-        update = false;
-      }
-      DPRINTF("Update flag set to: %d\n", update);
-    }
+  // One download at a time: a second one would rebuild the HTTP request and
+  // reopen the file while lwIP still writes the first (two tabs, a double
+  // click).
+  if (appmngr_download_in_flight()) {
+    return mngr_httpd_refuse("Another download is in progress",
+                             DOWNLOAD_BUSY_ERROR);
   }
+  const char *json = cgiparam_get("json", iNumParams, pcParam, pcValue);
+  if (json == NULL) {
+    DPRINTF("No app to download: the json parameter is missing\n");
+    return mngr_httpd_refuse("No app to install", DOWNLOAD_PARSEJSON_ERROR);
+  }
+  const char *update_value =
+      cgiparam_get("update", iNumParams, pcParam, pcValue);
+  bool update = update_value != NULL &&
+                starts_with_case_insensitive(update_value, "YyTt");
+  DPRINTF("Update flag set to: %d\n", update);
   appmngr_set_download_update(update);
-  for (size_t i = 0; i < iNumParams; i++) {
-    /* check if parameter is "json" */
-    if (strcmp(pcParam[i], "json") == 0) {
-      DPRINTF("JSON encoded value: %s\n", pcValue[i]);
-      int ret;
-      size_t len = 0;
-      char output_buffer[4096];
-      ret = mngr_httpd_base64_decode(
-          (unsigned char *)output_buffer, sizeof(output_buffer) - 1, &len,
-          (const unsigned char *)pcValue[i], strlen(pcValue[i]));
-      // Place a null terminator at the end of the string
-      output_buffer[len] = '\0';
-      if (ret != 0) {
-        DPRINTF("Error decoding base64: %d\n", ret);
-        static char error_url[64];  // Static buffer for the error URL
-        snprintf(error_url, sizeof(error_url),
-                 "/error.shtml?error=%d&error_msg=Decoding%20error", ret);
-        return error_url;
-      }
-      DPRINTF("Decoded value: %s\n", output_buffer);
-      download_err_t err = appmngr_save_app_info(output_buffer);
-      if (err != DOWNLOAD_OK) {
-        DPRINTF("Error saving app info: %d\n", err);
-        static char error_url[64];  // Static buffer for the error URL
-        snprintf(error_url, sizeof(error_url),
-                 "/error.shtml?error=%d&error_msg=Downloading%20error", err);
-        return error_url;
-      }
-      DPRINTF("App info saved\n");
-      appmngr_download_status(DOWNLOAD_STATUS_REQUESTED);
-      return "/downloading.shtml";
-    }
+
+  DPRINTF("JSON encoded value: %s\n", json);
+  size_t len = 0;
+  char output_buffer[4096];
+  int ret = mngr_httpd_base64_decode((unsigned char *)output_buffer,
+                                     sizeof(output_buffer) - 1, &len,
+                                     (const unsigned char *)json, strlen(json));
+  // Place a null terminator at the end of the string
+  output_buffer[len] = '\0';
+  if (ret != 0) {
+    DPRINTF("Error decoding base64: %d\n", ret);
+    return mngr_httpd_refuse("Decoding error", ret);
   }
+  DPRINTF("Decoded value: %s\n", output_buffer);
+  download_err_t err = appmngr_save_app_info(output_buffer);
+  if (err != DOWNLOAD_OK) {
+    DPRINTF("Error saving app info: %d\n", err);
+    return mngr_httpd_refuse("Downloading error", err);
+  }
+  DPRINTF("App info saved\n");
+  appmngr_download_status(DOWNLOAD_STATUS_REQUESTED);
+  return "/downloading.shtml";
 }
 
 // True while /.wificonf is on the card. The file re-applies the WiFi network
-// and the TCP/IP settings at every boot (EPIC-10), so those are read-only on
+// and the TCP/IP settings at every boot, so those are read-only on
 // the Network page and their saves are refused in cgi_saveparams: a change
 // made here would only last until the next reboot.
 static bool mngr_httpd_wificonfLocks(void) {
@@ -332,6 +347,73 @@ static bool mngr_httpd_isWificonfKey(const char *name) {
   return false;
 }
 
+// The value of the named setting in a /saveparams.cgi payload, or NULL.
+static const char *mngr_httpd_jsonParam(const cJSON *root, const char *key) {
+  const cJSON *item = NULL;
+  cJSON_ArrayForEach(item, root) {
+    const cJSON *name = cJSON_GetObjectItem(item, "name");
+    const cJSON *value = cJSON_GetObjectItem(item, "value");
+    if (cJSON_IsString(name) && cJSON_IsString(value) &&
+        strcmp(name->valuestring, key) == 0) {
+      return value->valuestring;
+    }
+  }
+  return NULL;
+}
+
+// A setting from the payload, or its stored value when the payload has none.
+static const char *mngr_httpd_paramOrStored(const char *value,
+                                            const char *key) {
+  if (value != NULL) {
+    return value;
+  }
+  SettingsConfigEntry *entry = settings_find_entry(gconfig_getContext(), key);
+  return entry != NULL ? entry->value : NULL;
+}
+
+// Checks the static TCP/IP settings in a /saveparams.cgi payload before any of
+// them is stored: a typo stored here is applied at the next boot and takes the
+// device off the network. Only when the payload touches them and DHCP ends up
+// off, so a value left in flash cannot block saving something else. Fields the
+// payload does not carry count with their stored value. Returns the name of
+// the first invalid field, or NULL; *isStatic says *out holds what to store.
+static const char *mngr_httpd_checkStaticTcpip(const cJSON *root,
+                                               network_static_config_t *out,
+                                               bool *isStatic) {
+  *isStatic = false;
+  const char *dhcp = mngr_httpd_jsonParam(root, PARAM_WIFI_DHCP);
+  const char *address = mngr_httpd_jsonParam(root, PARAM_WIFI_IP);
+  const char *netmask = mngr_httpd_jsonParam(root, PARAM_WIFI_NETMASK);
+  const char *gateway = mngr_httpd_jsonParam(root, PARAM_WIFI_GATEWAY);
+  const char *dns = mngr_httpd_jsonParam(root, PARAM_WIFI_DNS);
+  if (dhcp == NULL && address == NULL && netmask == NULL && gateway == NULL &&
+      dns == NULL) {
+    return NULL;
+  }
+  const char *finalDhcp = mngr_httpd_paramOrStored(dhcp, PARAM_WIFI_DHCP);
+  if (finalDhcp != NULL && starts_with_case_insensitive(finalDhcp, "YyTt")) {
+    return NULL;
+  }
+  const char *bad = network_checkStaticConfig(
+      mngr_httpd_paramOrStored(address, PARAM_WIFI_IP),
+      mngr_httpd_paramOrStored(netmask, PARAM_WIFI_NETMASK),
+      mngr_httpd_paramOrStored(gateway, PARAM_WIFI_GATEWAY),
+      mngr_httpd_paramOrStored(dns, PARAM_WIFI_DNS), out);
+  *isStatic = (bad == NULL);
+  return bad;
+}
+
+// The canonical text to store for a static TCP/IP setting, or NULL for any
+// other setting.
+static const char *mngr_httpd_canonicalTcpip(
+    const char *name, const network_static_config_t *cfg) {
+  if (strcmp(name, PARAM_WIFI_IP) == 0) return cfg->address;
+  if (strcmp(name, PARAM_WIFI_NETMASK) == 0) return cfg->netmask;
+  if (strcmp(name, PARAM_WIFI_GATEWAY) == 0) return cfg->gateway;
+  if (strcmp(name, PARAM_WIFI_DNS) == 0) return cfg->dns;
+  return NULL;
+}
+
 /**
  * @brief Update the given params with the new values
  *
@@ -346,8 +428,8 @@ const char *cgi_saveparams(int iIndex, int iNumParams, char *pcParam[],
                            char *pcValue[]) {
   DPRINTF("cgi_saveparams called with index %d\n", iIndex);
   for (size_t i = 0; i < iNumParams; i++) {
-    /* check if parameter is "json" */
-    if (strcmp(pcParam[i], "json") == 0) {
+    /* check if parameter is "json"; "?json" without a value is no json */
+    if (strcmp(pcParam[i], "json") == 0 && pcValue[i] != NULL) {
       DPRINTF("JSON encoded value: %s\n", pcValue[i]);
       int ret;
       size_t len = 0;
@@ -398,6 +480,18 @@ const char *cgi_saveparams(int iIndex, int iNumParams, char *pcParam[],
               }
             }
           }
+          network_static_config_t staticConfig;
+          bool isStatic = false;
+          const char *badField =
+              mngr_httpd_checkStaticTcpip(root, &staticConfig, &isStatic);
+          if (badField != NULL) {
+            DPRINTF("Refusing the TCP/IP settings: invalid %s\n", badField);
+            response_status = MNGR_HTTPD_RESPONSE_BAD_REQUEST;
+            snprintf(httpd_response_message, sizeof(httpd_response_message),
+                     "Invalid %s. Nothing was saved.", badField);
+            cJSON_Delete(root);
+            return "/response.shtml";
+          }
           // Iterate over the JSON array
           cJSON *item = NULL;
           cJSON_ArrayForEach(item, root) {
@@ -408,13 +502,18 @@ const char *cgi_saveparams(int iIndex, int iNumParams, char *pcParam[],
             // Print each parameter
             if (cJSON_IsString(name) && cJSON_IsString(type) &&
                 cJSON_IsString(value)) {
-              DPRINTF("Param Name: %s, Type: %s, Value: %s\n",
-                      name->valuestring, type->valuestring, value->valuestring);
+              // The value is not logged: this also carries the WiFi password.
+              DPRINTF("Param Name: %s, Type: %s\n", name->valuestring,
+                      type->valuestring);
               if (strcasecmp(type->valuestring, "STRING") == 0) {
-                settings_put_string(gconfig_getContext(), name->valuestring,
-                                    value->valuestring);
-                DPRINTF("Setting %s to %s saved.\n", name->valuestring,
-                        value->valuestring);
+                const char *canonical =
+                    isStatic ? mngr_httpd_canonicalTcpip(name->valuestring,
+                                                         &staticConfig)
+                             : NULL;
+                settings_put_string(
+                    gconfig_getContext(), name->valuestring,
+                    canonical != NULL ? canonical : value->valuestring);
+                DPRINTF("Setting %s saved.\n", name->valuestring);
               } else if (strcasecmp(type->valuestring, "INT") == 0) {
                 settings_put_integer(gconfig_getContext(), name->valuestring,
                                      atoi(value->valuestring));
@@ -526,23 +625,17 @@ static const char *cgi_fsnext(int iIndex, int iNumParams, char *pcParam[],
 const char *cgi_deleteapp(int iIndex, int iNumParams, char *pcParam[],
                           char *pcValue[]) {
   DPRINTF("cgi_deleteapp called with index %d\n", iIndex);
-  download_delete_err_t err = DOWNLOAD_DELETEAPP_OK;
-  for (size_t i = 0; i < iNumParams; i++) {
-    /* check if parameter is "json" */
-    if (strcmp(pcParam[i], "uuid") == 0) {
-      DPRINTF("APP to delete with UUID: %s\n", pcValue[i]);
-      err = appmngr_delete_app(pcValue[i]);
-      if (err == DOWNLOAD_DELETEAPP_OK) {
-        DPRINTF("App deleted\n");
-        return "/deleting.shtml";
-      }
+  download_delete_err_t err = DOWNLOAD_DELETEAPP_NOTUUID_ERROR;
+  const char *uuid = cgiparam_get("uuid", iNumParams, pcParam, pcValue);
+  if (uuid != NULL) {
+    DPRINTF("APP to delete with UUID: %s\n", uuid);
+    err = appmngr_delete_app(uuid);
+    if (err == DOWNLOAD_DELETEAPP_OK) {
+      DPRINTF("App deleted\n");
+      return "/deleting.shtml";
     }
   }
-  // Use err code 0 for generic error
-  static char error_url[128];  // Static buffer for the error URL
-  snprintf(error_url, sizeof(error_url),
-           "/error.shtml?error=%d&error_msg=Deleting%20error", err);
-  return error_url;
+  return mngr_httpd_refuse("Deleting error", err);
 }
 
 /**
@@ -558,24 +651,17 @@ const char *cgi_deleteapp(int iIndex, int iNumParams, char *pcParam[],
 const char *cgi_launchapp(int iIndex, int iNumParams, char *pcParam[],
                           char *pcValue[]) {
   DPRINTF("cgi_launchapp called with index %d\n", iIndex);
-  download_launch_err_t err = DOWNLOAD_LAUNCHAPP_OK;
-  for (size_t i = 0; i < iNumParams; i++) {
-    /* check if parameter is "json" */
-    if (strcmp(pcParam[i], "uuid") == 0) {
-      DPRINTF("APP to launch with UUID: %s\n", pcValue[i]);
-      appmngr_schedule_launch_app(pcValue[i]);
-      return "/launching.html";
-    }
+  const char *uuid = cgiparam_get("uuid", iNumParams, pcParam, pcValue);
+  if (uuid_is_exact4(uuid)) {
+    DPRINTF("APP to launch with UUID: %s\n", uuid);
+    appmngr_schedule_launch_app(uuid);
+    return "/launching.html";
   }
-  // Use err code 0 for generic error
-  static char error_url[128];  // Static buffer for the error URL
-  snprintf(error_url, sizeof(error_url),
-           "/error.shtml?error=%d&error_msg=Deleting%20error", err);
-  return error_url;
+  return mngr_httpd_refuse("Launching error", DOWNLOAD_LAUNCHAPP_NOTUUID_ERROR);
 }
 
 /**
- * @brief "Restore and launch" the development app (EPIC-11).
+ * @brief "Restore and launch" the development app.
  *
  * Deletes the deploy API upload, erases the development app's config and
  * flashes the binary downloaded from the catalog, then launches it: a clean
@@ -589,48 +675,34 @@ const char *cgi_launchapp(int iIndex, int iNumParams, char *pcParam[],
 const char *cgi_restoreapp(int iIndex, int iNumParams, char *pcParam[],
                            char *pcValue[]) {
   DPRINTF("cgi_restoreapp called with index %d\n", iIndex);
-  enum { RESTORE_ERROR_URL_SIZE = 160 };
-  static char error_url[RESTORE_ERROR_URL_SIZE];
-  for (int i = 0; i < iNumParams; i++) {
-    if (strcmp(pcParam[i], "uuid") != 0) {
-      continue;
-    }
-    if (strcmp(pcValue[i], DEVAPI_DEV_APP_UUID) != 0) {
-      DPRINTF("Restore refused for %s: not the development app\n", pcValue[i]);
-      snprintf(error_url, sizeof(error_url),
-               "/error.shtml?error=%d&error_msg=Only%%20the%%20DEV%%20APP%%20"
-               "can%%20be%%20restored",
-               DOWNLOAD_LAUNCHAPP_NOTUUID_ERROR);
-      return error_url;
+  const char *uuid = cgiparam_get("uuid", iNumParams, pcParam, pcValue);
+  if (uuid != NULL) {
+    if (strcmp(uuid, DEVAPI_DEV_APP_UUID) != 0) {
+      DPRINTF("Restore refused for %s: not the development app\n", uuid);
+      return mngr_httpd_refuse("Only the DEV APP can be restored",
+                               DOWNLOAD_LAUNCHAPP_NOTUUID_ERROR);
     }
     if (!appmngr_get_sdcard_info()->ready) {
       DPRINTF("Restore refused: SD card not ready\n");
-      snprintf(error_url, sizeof(error_url),
-               "/error.shtml?error=%d&error_msg=SD%%20card%%20not%%20ready",
-               DOWNLOAD_LAUNCHAPP_SDCARDNOTREADY_ERROR);
-      return error_url;
+      return mngr_httpd_refuse("SD card not ready",
+                               DOWNLOAD_LAUNCHAPP_SDCARDNOTREADY_ERROR);
     }
     if (!devapi_hasCatalogBinary()) {
       // No launch error code describes this; 0 is the generic one, as in
       // cgi_launchapp. The message carries the meaning.
       DPRINTF("Restore refused: the DEV APP catalog binary is missing\n");
-      snprintf(error_url, sizeof(error_url),
-               "/error.shtml?error=0&error_msg=The%%20DEV%%20APP%%20binary%%20"
-               "is%%20missing.%%20Install%%20the%%20DEV%%20APP%%20again");
-      return error_url;
+      return mngr_httpd_refuse(
+          "The DEV APP binary is missing. Install the DEV APP again", 0);
     }
-    DPRINTF("Restore and launch scheduled for %s\n", pcValue[i]);
-    appmngr_schedule_restore_launch_app(pcValue[i]);
+    DPRINTF("Restore and launch scheduled for %s\n", uuid);
+    appmngr_schedule_restore_launch_app(uuid);
     return "/launching.html";
   }
-  snprintf(error_url, sizeof(error_url),
-           "/error.shtml?error=%d&error_msg=Missing%%20uuid",
-           DOWNLOAD_LAUNCHAPP_NOTUUID_ERROR);
-  return error_url;
+  return mngr_httpd_refuse("Missing uuid", DOWNLOAD_LAUNCHAPP_NOTUUID_ERROR);
 }
 
 /**
- * @brief "Restore config only" for the development app (EPIC-11).
+ * @brief "Restore config only" for the development app.
  *
  * Erases the development app's config sector and nothing else: the
  * microfirmware in the slot and the deploy API upload stay, and nothing is
@@ -647,18 +719,15 @@ const char *cgi_restoreconfig(int iIndex, int iNumParams, char *pcParam[],
   response_status = MNGR_HTTPD_RESPONSE_BAD_REQUEST;
   snprintf(httpd_response_message, sizeof(httpd_response_message),
            "Missing uuid");
-  for (int i = 0; i < iNumParams; i++) {
-    if (strcmp(pcParam[i], "uuid") != 0) {
-      continue;
-    }
-    if (strcmp(pcValue[i], DEVAPI_DEV_APP_UUID) != 0) {
-      DPRINTF("Config restore refused for %s: not the development app\n",
-              pcValue[i]);
+  const char *uuid = cgiparam_get("uuid", iNumParams, pcParam, pcValue);
+  if (uuid != NULL) {
+    if (strcmp(uuid, DEVAPI_DEV_APP_UUID) != 0) {
+      DPRINTF("Config restore refused for %s: not the development app\n", uuid);
       snprintf(httpd_response_message, sizeof(httpd_response_message),
                "Only the DEV APP settings can be restored");
       return "/response.shtml";
     }
-    switch (appmngr_erase_app_config(pcValue[i])) {
+    switch (appmngr_erase_app_config(uuid)) {
       case APPMNGR_CONFIG_ERASED:
         response_status = MNGR_HTTPD_RESPONSE_OK;
         snprintf(httpd_response_message, sizeof(httpd_response_message),
@@ -719,6 +788,12 @@ const char *cgi_factoryreset(int iIndex, int iNumParams, char *pcParam[],
 const char *cgi_firmware_upgrade_start(int iIndex, int iNumParams,
                                        char *pcParam[], char *pcValue[]) {
   DPRINTF("cgi_firmware_upgrade_start called with index %d\n", iIndex);
+  if (appmngr_download_in_flight()) {
+    response_status = MNGR_HTTPD_RESPONSE_BAD_REQUEST;
+    snprintf(httpd_response_message, sizeof(httpd_response_message),
+             "Another download is in progress");
+    return "/response.shtml";
+  }
   mngr_firmwareUpgradeStart();
   response_status = MNGR_HTTPD_RESPONSE_OK;
   snprintf(httpd_response_message, sizeof(httpd_response_message), "");
@@ -772,6 +847,10 @@ const char *cgi_download_retry(int iIndex, int iNumParams, char *pcParam[],
   LWIP_UNUSED_ARG(pcParam);
   LWIP_UNUSED_ARG(pcValue);
   DPRINTF("cgi_download_retry called\n");
+  if (appmngr_download_in_flight()) {
+    return mngr_httpd_refuse("Another download is in progress",
+                             DOWNLOAD_BUSY_ERROR);
+  }
   appmngr_set_download_phase(APPMNGR_PHASE_CONNECT);
   appmngr_download_error(DOWNLOAD_OK);
   appmngr_set_download_phase(APPMNGR_PHASE_CONNECT);
@@ -787,6 +866,12 @@ const char *cgi_download_cancel(int iIndex, int iNumParams, char *pcParam[],
   LWIP_UNUSED_ARG(pcParam);
   LWIP_UNUSED_ARG(pcValue);
   DPRINTF("cgi_download_cancel called\n");
+  // Cancel clears a failed download. A live one keeps its file: closing it
+  // under lwIP's receive callback would corrupt the card.
+  if (appmngr_download_in_flight()) {
+    return mngr_httpd_refuse("Another download is in progress",
+                             DOWNLOAD_BUSY_ERROR);
+  }
   appmngr_cleanup_download();
   appmngr_set_download_phase(APPMNGR_PHASE_IDLE);
   appmngr_download_status(DOWNLOAD_STATUS_IDLE);
@@ -927,7 +1012,9 @@ static u16_t ssi_handler(int iIndex, char *pcInsert, int iInsertLen
       char *ssid =
           settings_find_entry(gconfig_getContext(), PARAM_WIFI_SSID)->value;
       if (ssid != NULL) {
-        printed = snprintf(pcInsert, iInsertLen, "%s", ssid);
+        // The name of the network the device joined, chosen by whoever runs
+        // it: text, not markup.
+        printed = (int)textescape_html(pcInsert, (size_t)iInsertLen, ssid);
       } else {
         printed =
             snprintf(pcInsert, iInsertLen,
@@ -1059,10 +1146,14 @@ static u16_t ssi_handler(int iIndex, char *pcInsert, int iInsertLen
           wifi_network_info_t *network = &networks->networks[current_tag_part];
           char last_char =
               (current_tag_part == networks->count - 1) ? ' ' : ',';
+          // Network names are whatever nearby access points broadcast: a
+          // quote in one would end its JSON string.
+          char ssid[sizeof(network->ssid) * 6 + 1];
+          textescape_js(ssid, sizeof(ssid), network->ssid);
           printed = snprintf(pcInsert, iInsertLen,
                              "{\"SSID\": \"%s\",\"BSSID\": \"%s\",\"RSSI\": "
                              "\"%d\",\"AUTH\": \"%d\"}%c",
-                             network->ssid, network->bssid, network->rssi,
+                             ssid, network->bssid, network->rssi,
                              network->auth_mode, last_char);
           *next_tag_part = current_tag_part + 1;
         } else {
@@ -1120,8 +1211,10 @@ static u16_t ssi_handler(int iIndex, char *pcInsert, int iInsertLen
     }
     case 17: /* APPSURL */
     {
-      printed = snprintf(
-          pcInsert, iInsertLen, "%s",
+      // Inserted into script strings and JSON: escaped so the URL cannot end
+      // the string it is in.
+      printed = (int)textescape_js(
+          pcInsert, (size_t)iInsertLen,
           settings_find_entry(gconfig_getContext(), PARAM_APPS_CATALOG_URL)
               ->value);
       break;
@@ -1294,8 +1387,22 @@ static u16_t ssi_handler(int iIndex, char *pcInsert, int iInsertLen
     }
     case 22: /* DLNAME - which app is installing */
     {
-      printed = snprintf(pcInsert, iInsertLen, "%.64s",
-                         appmngr_get_app_info()->name);
+      // The catalog's app name, inside a script string on downloading.shtml:
+      // escaped, or a name such as "Diego's Floppy" ends the string.
+      char name[65];
+      snprintf(name, sizeof(name), "%s", appmngr_get_app_info()->name);
+      printed = (int)textescape_js(pcInsert, (size_t)iInsertLen, name);
+      break;
+    }
+    case 23: /* TITLEH1 */
+    {
+#if _DEBUG == 0
+      printed = snprintf(pcInsert, iInsertLen, "%s <small>(%s)</small>",
+                         BOOSTER_TITLE, RELEASE_VERSION);
+#else
+      printed = snprintf(pcInsert, iInsertLen, "%s <small>(%s-%s)</small>",
+                         BOOSTER_TITLE, RELEASE_VERSION, RELEASE_DATE);
+#endif
       break;
     }
     default: /* unknown tag */

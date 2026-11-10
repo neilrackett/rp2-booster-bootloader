@@ -2,16 +2,9 @@
 
 #include <ctype.h>
 
-// NOTE: this duplicates url_components_t and parse_url() from appmngr.h /
-// appmngr.c. The two copies must stay in step; folding them into one shared
-// helper is a worthwhile cleanup but out of scope for EPIC-01.
-typedef struct {
-  char protocol[16];
-  char host[128];
-  char uri[256];
-  // Explicit port from a "host:port" URL, or 0 to let the scheme decide.
-  uint16_t port;
-} url_components_t;
+#include "pico/rand.h"
+#include "urlparse.h"
+#include "vercmp.h"
 
 download_version_t status = DOWNLOAD_VERSION_IDLE;
 static char version_string[64] = {0};
@@ -30,53 +23,6 @@ static int strncasecmp_ascii(const char *a, const char *b, size_t n) {
     if (!ca || !cb) return tolower(ca) - tolower(cb);
     int d = tolower(ca) - tolower(cb);
     if (d) return d;
-  }
-  return 0;
-}
-
-// Extract the components of the URL (http/https://host[/uri])
-static int parse_url(const char *url, url_components_t *components) {
-  if (!url || !components) return -1;
-  memset(components, 0, sizeof(*components));
-
-  const char *protocol_end = strstr(url, "://");
-  if (!protocol_end) return -1;
-
-  size_t protocol_len = (size_t)(protocol_end - url);
-  if (protocol_len == 0 || protocol_len >= sizeof(components->protocol))
-    return -1;
-  memcpy(components->protocol, url, protocol_len);
-  components->protocol[protocol_len] = '\0';
-
-  const char *host_start = protocol_end + 3;  // skip ://
-  const char *uri_start = strchr(host_start, '/');
-  if (uri_start) {
-    size_t host_len = (size_t)(uri_start - host_start);
-    if (host_len == 0 || host_len >= sizeof(components->host)) return -1;
-    memcpy(components->host, host_start, host_len);
-    components->host[host_len] = '\0';
-
-    // Copy URI (ensure at least "/")
-    if (strlen(uri_start) >= sizeof(components->uri)) return -1;
-    strcpy(components->uri, uri_start);
-  } else {
-    // No path → set host and default uri "/"
-    if (strlen(host_start) == 0 ||
-        strlen(host_start) >= sizeof(components->host))
-      return -1;
-    strcpy(components->host, host_start);
-    components->uri[0] = '/';
-    components->uri[1] = '\0';
-  }
-
-  // Split an explicit port off the host ("host:8080"); 0 means "use the
-  // scheme default", which httpc resolves to 80 or 443.
-  char *port_sep = strchr(components->host, ':');
-  if (port_sep != NULL) {
-    unsigned long parsed = strtoul(port_sep + 1, NULL, 10);
-    if (parsed == 0 || parsed > UINT16_MAX) return -1;
-    components->port = (uint16_t)parsed;
-    *port_sep = '\0';
   }
   return 0;
 }
@@ -196,7 +142,7 @@ static download_version_t version_start_download(const char *url) {
     status = DOWNLOAD_VERSION_DEFAULT;
     return status;
   }
-  if (parse_url(url, &components) != 0) {
+  if (urlparse_parse(url, &components) != 0) {
     DPRINTF("Error parsing URL: %s\n", url ? url : "(null)");
     snprintf(version_string, sizeof(version_string), "%s", RELEASE_VERSION);
     status = DOWNLOAD_VERSION_CANNOTPARSEURL;
@@ -211,6 +157,7 @@ static download_version_t version_start_download(const char *url) {
   request.url = request_uri_buf;
   request.complete = false;
 
+  request.callback_arg = &request;
   request.headers_fn = http_client_header_check_size_fn;
   request.recv_fn = http_client_receive_version_fn;
   request.result_fn = http_client_result_complete_fn;
@@ -279,62 +226,63 @@ static download_version_t version_finish_download(void) {
 }
 
 void version_loop(void) {
+  if (request.url != NULL && !request.complete) {
+    // A request that timed out is still owned by lwIP, which closes it on its
+    // own timeout and then calls back into it: it must not be reused yet.
+    DPRINTF("Previous version request still open\n");
+    status = DOWNLOAD_VERSION_FAILED;
+    return;
+  }
   status = DOWNLOAD_VERSION_IDLE;
   request = (HTTPC_REQUEST_T){0};
   version_buf_used = 0;
   version_string[0] = '\0';
 
-  download_version_t start_status = version_start_download(VERSION_URL);
+  // A stale copy from the CDN would hide a release that exists.
+  static char fresh[URLPARSE_FRESH_URL_MAX];
+  download_version_t start_status =
+      version_start_download(urlparse_addCacheBuster(VERSION_URL, get_rand_32(),
+                                                     fresh, sizeof(fresh)) == 0
+                                 ? fresh
+                                 : VERSION_URL);
   if (start_status == DOWNLOAD_VERSION_DEFAULT ||
       start_status == DOWNLOAD_VERSION_CANNOTPARSEURL ||
       start_status == DOWNLOAD_VERSION_FAILED) {
+    request.complete = true;  // never sent: nothing will call back into it
     return;
   }
 
-  uint32_t waited_ms = 0;
+  // Real time: a poll pass can take much longer than its interval.
+  absolute_time_t deadline = make_timeout_time_ms(VERSION_DOWNLOAD_TIMEOUT_MS);
   while (version_poll_download() == DOWNLOAD_VERSION_POLL_CONTINUE) {
     if (status == DOWNLOAD_VERSION_FAILED) break;
-    waited_ms += VERSION_POLL_INTERVAL_MS;
-    if (waited_ms >= VERSION_DOWNLOAD_TIMEOUT_MS) {
-      DPRINTF("VERSION download timed out after %u ms\n", waited_ms);
+    if (absolute_time_diff_us(get_absolute_time(), deadline) < 0) {
+      DPRINTF("VERSION download timed out after %u ms\n",
+              (unsigned)VERSION_DOWNLOAD_TIMEOUT_MS);
       status = DOWNLOAD_VERSION_FAILED;
       break;
     }
   }
 
+  // The request is left as it is: if it timed out, lwIP still calls back
+  // into it until it closes the connection.
   (void)version_finish_download();
-  request = (HTTPC_REQUEST_T){0};
 }
 
 download_version_t version_get_status(void) { return status; }
 
-const char *version_get_string(void) {
-  return (version_string[0] != '\0') ? version_string : RELEASE_VERSION;
+// The fetched body counts only when the request finished with a 200 and the
+// body is a version: an error page, a captive portal's login page or a body
+// cut short by the timeout never shows up as the latest version.
+static bool version_fetched(void) {
+  return status == DOWNLOAD_VERSION_COMPLETED &&
+         vercmp_isVersion(version_string);
 }
 
-// Parse up to three numeric components from a version string (e.g.,
-// "2.0.5alpha" -> {2,0,5})
-static void parse_version3_numbers(const char *str, unsigned int out[3]) {
-  out[0] = out[1] = out[2] = 0U;
-  if (!str) return;
-  const char *p = str;
-  for (int k = 0; k < 3 && *p; ++k) {
-    while (*p && (*p < '0' || *p > '9')) ++p;
-    unsigned v = 0U;
-    while (*p >= '0' && *p <= '9') {
-      v = v * 10u + (unsigned)(*p - '0');
-      ++p;
-    }
-    out[k] = v;
-  }
+const char *version_get_string(void) {
+  return version_fetched() ? version_string : RELEASE_VERSION;
 }
 
 bool version_isNewer(void) {
-  unsigned cur[3] = {0}, rel[3] = {0};
-  parse_version3_numbers(version_string, cur);
-  parse_version3_numbers(RELEASE_VERSION, rel);
-  for (int i = 0; i < 3; ++i) {
-    if (cur[i] != rel[i]) return cur[i] > rel[i];
-  }
-  return false;
+  return version_fetched() && vercmp_isNewer(version_string, RELEASE_VERSION);
 }

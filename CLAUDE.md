@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `docs/epics/` holds the iteration/epic/story/task backlog for the current development cycle and is **gitignored** (local-only; the tracked `docs/*.png` screenshots are unaffected). Read `docs/epics/README.md` for the conventions, `ITERATIONS.md` for what the current cycle is trying to do, and `DECISIONS.md` for the standing `D-NN` decisions and `C-NN` constraints — cite those rather than re-deriving them. Regenerate the dashboard with `./docs/epics/cockpit.sh` after changing any epic or story.
 
-Work is strictly sequential: one epic at a time on an `epic-NN-<slug>` branch, commits tagged `(EPIC-NN STORY-NN)`, and work STOPS after each epic for Diego's hardware verification before anything merges.
+Work is strictly sequential: one epic at a time on an `epic/NN-<slug>` branch cut from the version's `release/vX.Y.Z` branch, and work STOPS after each epic for Diego's hardware verification before anything merges. See "Release workflow" below.
 
 ## Build commands
 
@@ -36,9 +36,37 @@ Toolchain: CMake, Python 3, `arm-none-eabi-*`, and **Perl** (the Booster CMake a
 
 Flash for quick validation: `picotool load -xv dist/rp-booster-<version>.uf2`.
 
-There is no test suite — "done" means a clean root build plus on-device verification (see AGENTS.md §"What 'done' looks like"). CI parity is what PR builds run:
+### Debug Probe tools (`tools/dev/`)
+
+With a Raspberry Pi Debug Probe on the cartridge's SWD pins (and its UART lead on GPIO 0/1 for the console), these build, flash and inspect the real device without the firmware's help. `tools/dev/README.md` has the details and what differs from md-microfirmware-template, where they come from.
 
 ```sh
+tools/dev/flash.sh release|debug         # out-of-tree build, flash Booster's region, verify, build ID
+python3 tools/dev/swd.py build-id        # which build the device runs (release_build_id in flash)
+python3 tools/dev/swd.py screen out.png  # the Atari screen, read from the cartridge window
+python3 tools/dev/swd.py postmortem      # a hung device: both cores' backtraces and state
+python3 tools/dev/console.py watch       # debug console, 921,600 baud (debug builds only)
+python3 tools/dev/testserver.py          # catalogs and failing downloads over HTTP and HTTPS
+```
+
+- **Flash only with `tools/dev/flash.sh` or `swd.py program`,** never with OpenOCD's `program`: they stop the cartridge emulation's PIO and DMA first, which keep writing RAM while the cores are halted.
+- **Power-cycle before any network check.** Every reset from the tools (and the watchdog) restarts the RP2040 but not the Pico W's CYW43 radio, which may then never rejoin WiFi.
+- **`flash.sh` never touches `booster/build`, `dist/` or the submodules,** unlike `./build.sh`, so it is safe while other work is in progress. It writes Booster's region only; the microfirmware slot and every setting stay.
+- Only one program can read the probe's serial port: close CoolTerm before `console.py watch`, and stop `console.py` before opening CoolTerm.
+
+Host tests cover the firmware's pure logic (URL parsing, UUIDs, the apps lookup table, version comparison, the WiFi and `.wificonf` parsers, the ROM3 command parser). They build with the host compiler under ASan and UBSan, need no SDK, and run in seconds:
+
+```sh
+make -C tests/host test         # must pass
+make -C tests/host known-bugs   # each bug_*.c shows a defect not fixed yet, and must still fail
+```
+
+Each `tests/host/test_*.c` names the firmware sources it compiles on its first line (`// units: booster/src/x.c`), with `tests/host/shim/` standing in for the few SDK headers they include. Logic that needs testing goes in an SDK-free unit like those, not in a file that pulls in lwIP or cyw43. When a fix makes a `bug_*.c` pass, rename it to `test_*.c` in the same change. The framework is md-rom-emulator's (`tests/host` at `3cd573d`).
+
+The host tests do not replace the hardware: "done" still means a clean root build plus on-device verification (see AGENTS.md §"What 'done' looks like"). CI parity is what PR builds run:
+
+```sh
+make -C tests/host test known-bugs
 ./build.sh pico_w release image
 ./build.sh pico_w debug
 ```
@@ -105,6 +133,28 @@ The placeholder app occupies the microfirmware slot when nothing is installed an
 - **Memory map is load-bearing.** Booster, placeholder, config sectors, lookup table, and global settings all assume the layout in `memmap_booster.ld`. Changing offsets means coordinated changes in the linker script, the build's flash-usage report, OTA, and the upgrader.
 - **Flash budget is tight.** Release builds use `MinSizeRel` for the upgrader and the build aborts if Booster exceeds its slot. When adding code or web assets, keep an eye on the size report.
 - **Style:** follow `.clang-format` and `.clang-tidy` for any C/C++ you touch. Don't introduce new clang-tidy warnings.
+
+## Release workflow
+
+These rules apply to every new version:
+
+- **A version starts with a release branch.** Create `release/vX.Y.Z` from `main`, where `vX.Y.Z`
+  is exactly what `version.txt` will contain for that release.
+- **One branch per epic, cut from the release branch**, named `epic/NN-<slug>`. All work for the
+  epic is committed there, including the `version.txt` bump in the first epic of a release.
+- **An epic's pull request targets `release/vX.Y.Z`, never `main`.** It is merged only after
+  Diego has verified the epic on real hardware.
+- **`main` receives the release branch once**, when the whole version is done and verified. Only
+  then is the tag pushed (`make tag`), which triggers the release workflow.
+- **Nothing committed or pushed may name an epic, story, iteration, decision (`D-NN`), constraint (`C-NN`) or the
+  `docs/epics/` folder**: code comments, documentation, changelog, README, commit messages, PR
+  descriptions. Epic branch names (`epic/NN-<slug>`) are the one exception. `docs/epics/` is
+  gitignored, so a planning identifier tells a reader of the repository nothing and cannot be
+  looked up. Write what the code does and why instead. Record the implementing commit hashes in
+  the story's notes. Release check:
+  `git grep -nIiE "EPIC-|STORY-|docs/epics|\b[CD]-[0-9]{2}\b" -- ':!CLAUDE.md' ':!AGENTS.md' ':!.gitignore'`
+  comes back empty.
+- Commit, push, open and merge pull requests only when Diego asks.
 
 ## No AI attribution
 

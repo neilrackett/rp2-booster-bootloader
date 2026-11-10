@@ -109,7 +109,9 @@ You can load the UF2 with `picotool`:
 picotool load -xv dist/rp-booster-<version>.uf2
 ```
 
-For serious work, prefer debugging with a probe + VS Code (see `.vscode/` and the SidecarTridge docs).
+With a Raspberry Pi Debug Probe, use `tools/dev/` instead (see `tools/dev/README.md`): `tools/dev/flash.sh release|debug` builds out of tree, flashes Booster's region only and verifies over SWD that the device runs the new build; `tools/dev/swd.py` reads the running device (build ID, heap, crash reason, the Atari screen, backtraces); `tools/dev/console.py` captures the debug console at 921,600 baud. Flash only with `flash.sh` or `swd.py program`, never OpenOCD's `program`: they stop the cartridge emulation's PIO and DMA first. A reset does not reset the Pico W's radio: power-cycle before any network check.
+
+VS Code with the probe (see `.vscode/`) remains the way to step through code.
 
 ---
 
@@ -158,6 +160,26 @@ Protocol parsing/lookup may happen in an interrupt context, but command handling
 * Follow `.clang-format` and `.clang-tidy` configurations in the repo root.
 * If you touch C/C++ files, format them and avoid introducing new clang-tidy warnings.
 
+### Release workflow
+
+- **A version starts with a release branch.** Create `release/vX.Y.Z` from `main`, where `vX.Y.Z`
+  is exactly what `version.txt` will contain for that release.
+- **One branch per epic, cut from the release branch**, named `epic/NN-<slug>`. All work for the
+  epic is committed there, including the `version.txt` bump in the first epic of a release.
+- **An epic's pull request targets `release/vX.Y.Z`, never `main`.** It is merged only after
+  Diego has verified the epic on real hardware.
+- **`main` receives the release branch once**, when the whole version is done and verified. Only
+  then is the tag pushed (`make tag`), which triggers the release workflow.
+- **Nothing committed or pushed may name an epic, story, iteration, decision (`D-NN`), constraint (`C-NN`) or the
+  `docs/epics/` folder**: code comments, documentation, changelog, README, commit messages, PR
+  descriptions. Epic branch names (`epic/NN-<slug>`) are the one exception. `docs/epics/` is
+  gitignored, so a planning identifier tells a reader of the repository nothing and cannot be
+  looked up. Write what the code does and why instead. Record the implementing commit hashes in
+  the story's notes. Release check:
+  `git grep -nIiE "EPIC-|STORY-|docs/epics|\b[CD]-[0-9]{2}\b" -- ':!CLAUDE.md' ':!AGENTS.md' ':!.gitignore'`
+  comes back empty.
+- Commit, push, open and merge pull requests only when Diego asks.
+
 ### Submodules
 
 Do not change submodule pins unless the change is explicitly required. If you do, call it out clearly in the PR/commit message and note compatibility risk.
@@ -192,15 +214,20 @@ In `term/atarist/`, then rebuild to refresh `booster/src/include/term_firmware.h
 
 Before considering a change complete:
 
-1. Root build succeeds:
+1. Host tests pass, and every known bug still fails (a fixed one is renamed from `bug_*.c` to `test_*.c`):
+
+   ```sh
+   make -C tests/host test known-bugs
+   ```
+2. Root build succeeds:
 
    ```sh
    ./build.sh pico_w debug
    ```
-2. `dist/` contains `rp-booster-<version>*.uf2`.
-3. If `upgrader/` or `term/atarist/` changed: confirm the embedded headers were regenerated.
-4. No obvious style regressions (clang-format) in files you touched.
-5. Behavior matches README expectations.
+3. `dist/` contains `rp-booster-<version>*.uf2`.
+4. If `upgrader/` or `term/atarist/` changed: confirm the embedded headers were regenerated.
+5. No obvious style regressions (clang-format) in files you touched.
+6. Behavior matches README expectations.
 
 ---
 

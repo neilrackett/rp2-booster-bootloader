@@ -3,7 +3,7 @@
  * Author: Diego Parrilla Santamaría
  * Date: September 2026
  * Copyright: 2026 - GOODDATA LABS SL
- * Description: The .wificonf file on the microSD card (EPIC-10, D-09)
+ * Description: The .wificonf file on the microSD card
  *
  * Read at every Booster boot, factory and Manager alike, before WiFi starts.
  * While the file is on the card it is the WiFi configuration: what it says is
@@ -17,14 +17,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "network.h"
+#include "network_parse.h"
 
 #define WIFICONF_FILE "/.wificonf"
 #define WIFICONF_LINE_MAX 128
 
 // Keys, matched case-insensitively against the text before the first '='.
-// The three WiFi keys predate EPIC-10; the TCPIP_* block is optional and its
-// grammar is D-09.
+// The three WiFi keys came first; the TCPIP_* block is optional and follows
+// the rules documented on the apply function below.
 #define WIFICONF_KEY_SSID "SSID"
 #define WIFICONF_KEY_PASS "PASS"
 #define WIFICONF_KEY_AUTH "AUTH"
@@ -43,7 +43,7 @@ typedef enum {
 typedef struct {
   // WiFi block. has* records that the key was present; the value is what
   // network_parseSSID() / network_parsePassword() made of the text, exactly
-  // as the factory-mode parser stored it before EPIC-10.
+  // as the factory-mode parser originally stored it.
   bool hasSsid;
   char ssid[MAX_SSID_LENGTH];
   bool hasPass;
@@ -52,8 +52,7 @@ typedef struct {
   uint16_t auth;
   // TCPIP_* block. The strings hold canonical dotted-quad text and are empty
   // when the key was absent or invalid. tcpipInvalid records that some
-  // TCPIP_* line failed to parse, which drops the whole block at apply time
-  // (D-09 rule 3).
+  // TCPIP_* line failed to parse, which drops the whole block at apply time.
   wificonf_dhcp_t dhcp;
   char address[NETWORK_IPV4_STR_MAX];
   char netmask[NETWORK_IPV4_STR_MAX];
@@ -83,7 +82,7 @@ bool wificonf_readFile(wificonf_t *cfg);
  * @brief Applies cfg to the global settings in RAM. Nothing is written to
  * flash here.
  *
- * The WiFi keys are applied when present. The TCPIP_* block follows D-09: no
+ * The WiFi keys are applied when present. In the TCPIP_* block, no
  * TCPIP_DHCP line leaves the stored setting alone; on stores DHCP on; off is
  * all or nothing, stored only when address, netmask and gateway all parsed
  * and no TCPIP_* line failed, with DNS optional.

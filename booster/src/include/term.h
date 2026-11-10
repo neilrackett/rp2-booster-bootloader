@@ -75,6 +75,18 @@ void __not_in_flash_func(term_dma_irq_handler_lookup)(void);
 void term_init(void);
 bool term_isActive(void);
 
-void __not_in_flash_func(term_loop)();
+// Handles the command the Atari sent, if any, and answers it. Returns true
+// when there was one.
+bool __not_in_flash_func(term_loop)(void);
+
+#if defined(_DEBUG) && (_DEBUG != 0)
+// Debug mailbox (devhooks.h) only. term_injectProtocol() queues a command as
+// if the protocol parser had received it; false while another one is pending.
+// term_injectBusWords() feeds words to the parser as if the ST had read them
+// from ROM3 and returns the count of oversized frames it has dropped.
+bool term_injectProtocol(uint16_t commandId, const uint16_t *payload,
+                         uint16_t payloadSize);
+uint32_t term_injectBusWords(const uint16_t *words, uint16_t count);
+#endif
 
 #endif  // TERM_H

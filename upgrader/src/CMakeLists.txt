@@ -106,14 +106,24 @@ add_executable(${PROJECT_NAME}
     main.c
 )
 
+# A function that can end without returning its value is an error, not a
+# warning: a CGI handler that fell off its end handed lwIP whatever was in r0
+# as the page to send.
+target_compile_options(${PROJECT_NAME} PRIVATE -Werror=return-type)
+
 target_sources(${PROJECT_NAME} PRIVATE
     gconfig.c
     hw_config.c
+    # Booster's copy into flash, shared so the two write it the same way.
+    ${CMAKE_CURRENT_LIST_DIR}/../../booster/src/uf2copy.c
 )
 
-# Ensure local headers are visible to all target sources
+# Ensure local headers are visible to all target sources. Booster's include
+# folder comes after the upgrader's own, for uf2copy.h only: the upgrader has
+# its own constants.h and debug.h, which must win.
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/include
+    ${CMAKE_CURRENT_LIST_DIR}/../../booster/src/include
 )
 
 # Create map/bin/hex/uf2 files
@@ -178,9 +188,15 @@ else()
     target_link_libraries(${PROJECT_NAME} PRIVATE pico_stdlib)
     pico_enable_stdio_uart(${PROJECT_NAME} 1)
     pico_enable_stdio_usb(${PROJECT_NAME} 0)
+    # The same 921,600 baud as Booster's debug console, so one capture
+    # (tools/dev/console.py) reads both across the reboot into the upgrader.
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
+        PICO_DEFAULT_UART_BAUD_RATE=921600)
 endif()
 
 # Pass these values to the C compiler
+# DEBUG_MODE turns on the DPRINTF output in debug.h.
+add_definitions(-D_DEBUG=${_DEBUG})
 add_definitions(-DRELEASE_TYPE="${RELEASE_TYPE}")
 add_definitions(-DRELEASE_VERSION="${RELEASE_VERSION}")
 add_definitions(-DRELEASE_DATE="${RELEASE_DATE}")

@@ -5,9 +5,13 @@
 #include <strings.h>
 
 #include "devapi.h"
+#include "httphdr.h"
+#include "jsonfield.h"
+#include "lookupbackup.h"
 #include "lwip/stats.h"
-
+#include "pico/unique_id.h"
 #include "select.h"
+#include "uf2copy.h"
 #include "upgrader_firmware.h"
 
 // Create an enum for the type of download
@@ -22,11 +26,15 @@ static download_status_t download_firmware_status = DOWNLOAD_STATUS_IDLE;
 static download_err_t download_error = DOWNLOAD_OK;
 static download_err_t download_firmware_error = DOWNLOAD_OK;
 static HTTPC_REQUEST_T request = {0};
+// Why the headers callback refused the response, when it did for a reason of
+// its own: the result callback reports it as is and does not retry, where it
+// would otherwise call any aborted transfer an HTTP error and try again.
+static download_err_t headers_refused = DOWNLOAD_OK;
 // Persistent storage for async HTTP request strings to avoid dangling pointers
 static char request_host_buf[256];
 static char request_uri_buf[1536];
 
-// --- Redirect following (EPIC-08) -------------------------------------
+// --- Redirect following -------------------------------------
 // A 30x is detected in the headers callback, which aborts the body so no
 // redirect page is ever written to the destination file, and records the
 // target. appmngr_poll_download_app() re-issues from the main loop, once the
@@ -80,10 +88,20 @@ static absolute_time_t redirect_retry_time;
 // mutex the callbacks already run under, so main-loop filesystem sections
 // take it too; it is recursive, so a path reached from a callback (which
 // already holds it) is unaffected.
+//
+// Once the network has stopped, for a launch or for offline mode, there is no
+// worker left to exclude and no async context to lock: its deinit zeroes it,
+// and taking the lock would call through a null pointer.
 static inline void appmngr_fs_lock(void) {
+  if (!network_isInitialized()) {
+    return;
+  }
   async_context_acquire_lock_blocking(cyw43_arch_async_context());
 }
 static inline void appmngr_fs_unlock(void) {
+  if (!network_isInitialized()) {
+    return;
+  }
   async_context_release_lock(cyw43_arch_async_context());
 }
 // The components of the request currently in flight, needed to resolve a
@@ -157,108 +175,6 @@ static void appmngr_prepare_launch_runtime(void) {
 
 void appmngr_set_download_update(bool update) { download_update = update; }
 
-// Helper function to check if a 36-character string is a valid UUID4.
-// A valid UUID4 is in the canonical format
-// "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx" where x is a hexadecimal digit and y
-// is one of [8, 9, A, B] (case-insensitive).
-static int is_valid_uuid4(const char *uuid) {
-  // Check length: assume uuid is exactly 36 characters (without a null
-  // terminator). Check that the hyphens are in the correct positions.
-  for (int i = 0; i < 36; i++) {
-    if (i == 8 || i == 13 || i == 18 || i == 23) {
-      if (uuid[i] != '-') {
-        return 0;
-      }
-    } else {
-      if (!isxdigit((unsigned char)uuid[i])) {
-        return 0;
-      }
-    }
-  }
-  // Check the version: the first character of the third group (index 14) must
-  // be '4'
-  if (uuid[14] != '4') {
-    return 0;
-  }
-  // Check the variant: the first character of the fourth group (index 19)
-  // must be one of '8', '9', 'A', or 'B' (case-insensitive)
-  char variant = uuid[19];
-  if (!(variant == '8' || variant == '9' || variant == 'A' || variant == 'B' ||
-        variant == 'a' || variant == 'b')) {
-    return 0;
-  }
-  return 1;
-}
-
-// Extract the components of the URL
-static int parse_url(const char *url, url_components_t *components) {
-  if (!url || !components) {
-    return -1;  // Invalid arguments
-  }
-
-  // Initialize the components
-  memset(components, 0, sizeof(url_components_t));
-
-  // Find the protocol separator ("://")
-  const char *protocol_end = strstr(url, "://");
-  if (!protocol_end) {
-    return -1;  // Invalid URL format
-  }
-
-  // Extract the protocol
-  size_t protocol_len = protocol_end - url;
-  if (protocol_len >= sizeof(components->protocol)) {
-    return -1;  // Protocol too long
-  }
-  strncpy(components->protocol, url, protocol_len);
-  components->protocol[protocol_len] = '\0';
-
-  // Find the host start and URI start
-  const char *host_start = protocol_end + 3;  // Skip "://"
-  const char *uri_start = strchr(host_start, '/');
-  size_t host_len;
-
-  if (uri_start) {
-    // URI exists
-    host_len = uri_start - host_start;
-    if (host_len >= sizeof(components->host)) {
-      return -1;  // Host too long
-    }
-    strncpy(components->host, host_start, host_len);
-    components->host[host_len] = '\0';
-
-    // Copy the URI. Refuse rather than truncate: a silently shortened path
-    // becomes a request for the wrong resource, and on a redirect chain that
-    // means downloading something other than what was asked for. The measured
-    // worst case is a GitHub release asset at 919 characters.
-    if (strlen(uri_start) >= sizeof(components->uri)) {
-      DPRINTF("URI too long for the buffer: %u >= %u\n",
-              (unsigned)strlen(uri_start), (unsigned)sizeof(components->uri));
-      return -1;
-    }
-    strncpy(components->uri, uri_start, sizeof(components->uri) - 1);
-  } else {
-    // No URI, only host
-    strncpy(components->host, host_start, sizeof(components->host) - 1);
-    components->uri[0] = '/';
-    components->uri[1] = '\0';
-  }
-
-  // Split an explicit port off the host ("host:8080"); 0 means "use the
-  // scheme default", which httpc resolves to 80 or 443.
-  char *port_sep = strchr(components->host, ':');
-  if (port_sep != NULL) {
-    unsigned long parsed = strtoul(port_sep + 1, NULL, 10);
-    if (parsed == 0 || parsed > UINT16_MAX) {
-      return -1;  // Malformed port
-    }
-    components->port = (uint16_t)parsed;
-    *port_sep = '\0';
-  }
-
-  return 0;  // Success
-}
-
 // Write the sdcard_write_file function
 static int sdcard_write_file(const char *filename, const char *data,
                              size_t size) {
@@ -288,6 +204,12 @@ static int sdcard_write_file(const char *filename, const char *data,
 }
 
 static download_err_t set_app_info(const char *json_str) {
+  // The entry is saved whole as the app's .json, which every reader parses:
+  // cut to fit, the app would install and then vanish from the installed list.
+  if (strlen(json_str) >= sizeof(app_info.json)) {
+    DPRINTF("App info too long: %u bytes\n", (unsigned)strlen(json_str));
+    return DOWNLOAD_PARSEJSON_ERROR;
+  }
   cJSON *root = cJSON_Parse(json_str);
   if (root == NULL) {
     DPRINTF("Error parsing JSON\n");
@@ -305,10 +227,16 @@ static download_err_t set_app_info(const char *json_str) {
   cJSON *md5 = cJSON_GetObjectItem(root, "md5");
   cJSON *version = cJSON_GetObjectItem(root, "version");
 
-  // For each field, confirm it's a string before copying
-  if (uuid && cJSON_IsString(uuid)) {
-    snprintf(app_info.uuid, sizeof(app_info.uuid), "%s", uuid->valuestring);
+  // The uuid names the app's files on the card, so it must be a UUID and
+  // nothing else; a catalog entry without one is refused.
+  if (!cJSON_IsString(uuid) || !uuid_is_exact4(uuid->valuestring)) {
+    DPRINTF("Missing or invalid uuid in the app info\n");
+    cJSON_Delete(root);
+    return DOWNLOAD_PARSEJSON_ERROR;
   }
+  snprintf(app_info.uuid, sizeof(app_info.uuid), "%s", uuid->valuestring);
+
+  // For each field, confirm it's a string before copying
   if (name && cJSON_IsString(name)) {
     snprintf(app_info.name, sizeof(app_info.name), "%s", name->valuestring);
   }
@@ -426,7 +354,7 @@ static bool appmngr_parse_installed_app(
   if (uuid && cJSON_IsString(uuid) && uuid->valuestring && name &&
       cJSON_IsString(name) && name->valuestring &&
       strcasecmp(uuid->valuestring, expected_uuid) == 0 &&
-      is_valid_uuid4(expected_uuid)) {
+      uuid_is_valid4(expected_uuid)) {
     snprintf(installed_app->uuid, sizeof(installed_app->uuid), "%s",
              expected_uuid);
     snprintf(installed_app->name, sizeof(installed_app->name), "%s",
@@ -476,10 +404,12 @@ static void appmngr_sort_installed_apps(appmngr_installed_app_t *apps,
 download_err_t appmngr_save_app_info(const char *json_str) {
   // Save the app info to the SD card as a JSON file
 
-  int err = set_app_info(json_str);
-  if (err == DOWNLOAD_PARSEJSON_ERROR) {
+  // Any error, not only a parse error: a missing md5 used to install with
+  // the previous app's checksum and fail later as a "checksum mismatch".
+  download_err_t err = set_app_info(json_str);
+  if (err != DOWNLOAD_OK) {
     DPRINTF("Error setting app info: %i\n", err);
-    return DOWNLOAD_PARSEJSON_ERROR;
+    return err;
   }
   // We have the app info in the app_info struct, now save it to a temp file
   char filename[256] = {0};
@@ -594,39 +524,6 @@ static err_t http_client_receive_file_fn(__unused void *arg,
 }
 
 /**
- * @brief Find a header's value by name, case-insensitively.
- *
- * Ported from md-browser's download.c. Walks CRLF-delimited lines rather than
- * using strstr on the whole block, so a header name appearing inside another
- * header's value cannot match.
- */
-static bool appmngr_find_header_value(const char *headers, const char *name,
-                                      char *out, size_t out_len) {
-  size_t name_len = strlen(name);
-  const char *line = headers;
-  while (line != NULL && *line != '\0') {
-    if (strncasecmp(line, name, name_len) == 0) {
-      const char *value = line + name_len;
-      while (*value == ' ' || *value == '\t') {
-        value++;
-      }
-      size_t len = strcspn(value, "\r\n");
-      if (len == 0 || len >= out_len) {
-        return false;  // absent, or too long to use safely
-      }
-      memcpy(out, value, len);
-      out[len] = '\0';
-      return true;
-    }
-    line = strstr(line, "\r\n");
-    if (line != NULL) {
-      line += 2;
-    }
-  }
-  return false;
-}
-
-/**
  * @brief Turn a Location value into an absolute URL.
  *
  * Location may be absolute, host-relative ("/path"), or path-relative
@@ -704,15 +601,14 @@ static err_t http_client_header_check_size_fn(
   }
 
   // Redirects: record the target and abort the body. The re-issue happens in
-  // appmngr_poll_download_app() from the main loop (EPIC-08).
+  // appmngr_poll_download_app() from the main loop.
   if (http_status == 301 || http_status == 302 || http_status == 303 ||
       http_status == 307 || http_status == 308) {
     if (redirect_hops >= APPMNGR_MAX_REDIRECT_HOPS) {
       DPRINTF("Redirect limit (%d) exceeded\n", APPMNGR_MAX_REDIRECT_HOPS);
     } else {
       char location[APPMNGR_MAX_URL_SIZE];
-      if (appmngr_find_header_value(buf, "Location:", location,
-                                    sizeof(location))) {
+      if (httphdr_find(buf, "Location:", location, sizeof(location))) {
         appmngr_resolve_redirect_url(location, redirect_url,
                                      sizeof(redirect_url));
         DPRINTF("HTTP %d redirect to: %s\n", http_status, redirect_url);
@@ -771,6 +667,18 @@ static err_t http_client_header_check_size_fn(
     p = eol ? (eol + 2) : NULL;
   }
 
+  // Chunked framing would be written into the file as if it were data, and
+  // the result found out only at the checksum, as a corrupt download.
+  if (httphdr_is_chunked(buf)) {
+    DPRINTF("Chunked transfer refused\n");
+    headers_refused = DOWNLOAD_CHUNKED_ERROR;
+    if (download_type == DOWNLOAD_TYPE_FIRMWARE)
+      download_firmware_status = DOWNLOAD_STATUS_FAILED;
+    else
+      download_status = DOWNLOAD_STATUS_FAILED;
+    return ERR_ABRT;
+  }
+
   // A 2xx with headers parsed: the payload transfer starts now.
   download_phase = APPMNGR_PHASE_DOWNLOAD;
   if (download_type == DOWNLOAD_TYPE_FIRMWARE)
@@ -810,6 +718,19 @@ static void http_client_result_complete_fn(void *arg,
       download_status = DOWNLOAD_STATUS_IN_PROGRESS;
       download_error = DOWNLOAD_OK;
     }
+    return;
+  }
+
+  if (headers_refused != DOWNLOAD_OK) {
+    DPRINTF("Refused at the headers: %d\n", headers_refused);
+    if (download_type == DOWNLOAD_TYPE_FIRMWARE) {
+      download_firmware_status = DOWNLOAD_STATUS_FAILED;
+      download_firmware_error = headers_refused;
+    } else {
+      download_status = DOWNLOAD_STATUS_FAILED;
+      download_error = headers_refused;
+    }
+    appmngr_cleanup_tmp_download_file();
     return;
   }
 
@@ -906,6 +827,25 @@ static void appmngr_cleanup_tmp_download_file(void) {
   appmngr_fs_unlock();
 }
 
+// An app whose settings were moved to the card (it has a <uuid>.cfg and no
+// config sector) gets "settings":"card" added to its JSON, so the Apps page
+// can say where they are. The lookup table is read in place in flash.
+static void appmngr_note_settings_on_card(char *json, size_t max_len,
+                                          const char *uuid) {
+  if (lookuptable_get_page_for_uuid(uuid,
+                                    (uint8_t *)&_global_lookup_flash_start,
+                                    LOOKUP_TABLE_SIZE) >= 0) {
+    return;
+  }
+  char cfg_path[256];
+  snprintf(cfg_path, sizeof(cfg_path), "%s/%.36s.cfg", s_folder, uuid);
+  FILINFO info = {0};
+  if (f_stat(cfg_path, &info) != FR_OK) {
+    return;
+  }
+  jsonfield_append_string(json, max_len, "settings", "card");
+}
+
 static bool find_next_json_file(char *json, size_t max_len) {
   // We'll read directory entries until we find a valid .json file
   // or until we exhaust all entries
@@ -969,6 +909,7 @@ static bool find_next_json_file(char *json, size_t max_len) {
 
     // Null-terminate
     json[bytes_read] = '\0';
+    appmngr_note_settings_on_card(json, max_len, file_base);
 
     DPRINTF("JSON file contents: %s\n", json);
 
@@ -1080,7 +1021,7 @@ uint16_t appmngr_get_installed_apps(appmngr_installed_app_t *apps,
       continue;
     }
     snprintf(uuid, sizeof(uuid), "%.*s", (int)base_len, fno.fname);
-    if (!is_valid_uuid4(uuid)) {
+    if (!uuid_is_valid4(uuid)) {
       continue;
     }
 
@@ -1238,7 +1179,7 @@ download_err_t appmngr_verify_firmware_md5(void) {
                         sizeof(expected_fw_md5));
 
   // Integrity, not authenticity: the digest travels from the same host over
-  // the same unauthenticated TLS connection as the image (decision D-01), so
+  // the same unauthenticated TLS connection as the image, so
   // it catches truncation and corruption, not substitution.
   if (memcmp(expected_fw_md5, md5_ctx.digest, sizeof(expected_fw_md5)) != 0) {
     DPRINTF("Firmware MD5 mismatch: refusing to flash\n");
@@ -1337,9 +1278,20 @@ const char *appmngr_download_error_to_str(download_err_t err) {
       return "HTTP error";
     case DOWNLOAD_MD5UNAVAILABLE_ERROR:
       return "Firmware checksum (upgrade.md5) missing or unreadable";
+    case DOWNLOAD_CHUNKED_ERROR:
+      return "The server sent the file in chunks, which is not supported";
+    case DOWNLOAD_BUSY_ERROR:
+      return "Another download is in progress";
     default:
       return "Unknown error";
   }
+}
+
+// How many 4K config sectors the linker script reserves: one per app.
+static uint16_t appmngr_config_sector_count(void) {
+  return (uint16_t)(((uint32_t)&_global_lookup_flash_start -
+                     (uint32_t)&_config_flash_start) /
+                    FLASH_SECTOR_SIZE);
 }
 
 static int8_t appmngr_delete_config_sector(uint8_t sector) {
@@ -1364,6 +1316,141 @@ static int8_t appmngr_delete_config_sector(uint8_t sector) {
   restore_interrupts(ints);
   select_flashLockoutEnd();
   return 0;
+}
+
+// Write data (FLASH_SECTOR_SIZE bytes) into config sector `sector`: erase,
+// then program, with core 1 parked and interrupts off as every flash write
+// here is.
+static int8_t appmngr_program_config_sector(uint8_t sector,
+                                            const uint8_t *data) {
+  if (sector >= appmngr_config_sector_count()) {
+    return -1;
+  }
+  uint32_t offs = ((uint32_t)&_config_flash_start - XIP_BASE) +
+                  (uint32_t)sector * FLASH_SECTOR_SIZE;
+  select_flashLockoutBegin();
+  uint32_t ints = save_and_disable_interrupts();
+  flash_range_erase(offs, FLASH_SECTOR_SIZE);
+  flash_range_program(offs, data, FLASH_SECTOR_SIZE);
+  restore_interrupts(ints);
+  select_flashLockoutEnd();
+  return 0;
+}
+
+// <apps folder>/<uuid><suffix>: the file that holds an app's settings while
+// its config sector belongs to another app (".cfg"), or that file while it
+// is being written (".cfg.tmp").
+static void appmngr_settings_file_path(char *out, size_t out_size,
+                                       const char *uuid, const char *suffix) {
+  snprintf(out, out_size, "%s/%.36s%s",
+           settings_find_entry(gconfig_getContext(), PARAM_APPS_FOLDER)->value,
+           uuid, suffix);
+}
+
+// Remove an app's settings file from the card, if it has one.
+static bool appmngr_delete_settings_file(const char *uuid) {
+  char path[256];
+  appmngr_settings_file_path(path, sizeof(path), uuid, ".cfg.tmp");
+  appmngr_fs_lock();
+  f_unlink(path);
+  appmngr_settings_file_path(path, sizeof(path), uuid, ".cfg");
+  bool removed = f_unlink(path) == FR_OK;
+  appmngr_fs_unlock();
+  return removed;
+}
+
+// Save the contents of config sector `sector`, which belongs to `uuid`, to
+// <uuid>.cfg on the card. Written as <uuid>.cfg.tmp, synced, then renamed,
+// so a power cut leaves either the previous .cfg or the new one. A blank
+// sector holds no settings (the app runs on its defaults): nothing is saved
+// and an old .cfg is removed, so the app gets its defaults back too.
+// Returns 0 when the settings are safe on the card.
+static int appmngr_save_settings_to_card(const char *uuid, uint8_t sector) {
+  const uint8_t *data = (const uint8_t *)((uint32_t)&_config_flash_start +
+                                          (uint32_t)sector * FLASH_SECTOR_SIZE);
+  bool blank = true;
+  for (size_t i = 0; i < FLASH_SECTOR_SIZE; i++) {
+    if (data[i] != 0xFF) {
+      blank = false;
+      break;
+    }
+  }
+  if (blank) {
+    appmngr_delete_settings_file(uuid);
+    DPRINTF("Swap: sector %u of %.36s is blank, nothing to save\n", sector,
+            uuid);
+    return 0;
+  }
+  char tmp_path[256];
+  char cfg_path[256];
+  appmngr_settings_file_path(tmp_path, sizeof(tmp_path), uuid, ".cfg.tmp");
+  appmngr_settings_file_path(cfg_path, sizeof(cfg_path), uuid, ".cfg");
+  appmngr_fs_lock();
+  FIL file;
+  UINT written = 0;
+  FRESULT res = f_open(&file, tmp_path, FA_WRITE | FA_CREATE_ALWAYS);
+  if (res == FR_OK) {
+    res = f_write(&file, data, FLASH_SECTOR_SIZE, &written);
+    if (res == FR_OK) {
+      res = f_sync(&file);
+    }
+    FRESULT closed = f_close(&file);
+    if (res == FR_OK) {
+      res = closed;
+    }
+  }
+  if (res == FR_OK && written == FLASH_SECTOR_SIZE) {
+    f_unlink(cfg_path);
+    res = f_rename(tmp_path, cfg_path);
+  } else if (res == FR_OK) {
+    res = FR_DISK_ERR;  // short write: the card is full
+  }
+  if (res != FR_OK) {
+    f_unlink(tmp_path);
+  }
+  appmngr_fs_unlock();
+  if (res != FR_OK) {
+    DPRINTF("Swap: cannot save %s (%d)\n", cfg_path, res);
+    return -1;
+  }
+  DPRINTF("Swap: settings of %.36s saved to %s\n", uuid, cfg_path);
+  return 0;
+}
+
+// Fill config sector `sector` for `uuid`: its saved settings when it has a
+// <uuid>.cfg of exactly one sector, otherwise erased (the app's defaults).
+static int appmngr_restore_settings_from_card(const char *uuid,
+                                              uint8_t sector) {
+  char cfg_path[256];
+  appmngr_settings_file_path(cfg_path, sizeof(cfg_path), uuid, ".cfg");
+  uint8_t *data = malloc(FLASH_SECTOR_SIZE);
+  bool restored = false;
+  if (data != NULL) {
+    appmngr_fs_lock();
+    FIL file;
+    UINT read = 0;
+    if (f_open(&file, cfg_path, FA_READ) == FR_OK) {
+      if (f_size(&file) == FLASH_SECTOR_SIZE &&
+          f_read(&file, data, FLASH_SECTOR_SIZE, &read) == FR_OK &&
+          read == FLASH_SECTOR_SIZE) {
+        restored = true;
+      } else {
+        DPRINTF("Swap: %s is not one %u-byte sector; using defaults\n",
+                cfg_path, (unsigned)FLASH_SECTOR_SIZE);
+      }
+      f_close(&file);
+    }
+    appmngr_fs_unlock();
+  }
+  int res;
+  if (restored) {
+    res = appmngr_program_config_sector(sector, data);
+    DPRINTF("Swap: settings of %.36s restored into sector %u\n", uuid, sector);
+  } else {
+    res = appmngr_delete_config_sector(sector);
+  }
+  free(data);
+  return res;
 }
 
 /**
@@ -1423,7 +1510,7 @@ void appmngr_load_apps_lookup_table(uint8_t *table, uint16_t *length) {
       break;
     }
 
-    if (!is_valid_uuid4((const char *)entry_ptr)) {
+    if (!uuid_is_valid4((const char *)entry_ptr)) {
       // Invalid UUID format: assume no further valid data.
       break;
     }
@@ -1439,301 +1526,9 @@ void appmngr_load_apps_lookup_table(uint8_t *table, uint16_t *length) {
   *length = total_bytes_read;
 }
 
-/**
- * Searches the lookup table for an entry matching the given UUID.
- *
- * @param uuid   A pointer to the 36-character UUID string to search for.
- * @param table  A pointer to the lookup table data in RAM.
- * @param length Total number of bytes stored in the lookup table.
- *
- * @return The page number (as a 16-bit integer) if found, or -1 if not found.
- */
-static int16_t appmngr_get_page_number_for_uuid(const char *uuid,
-                                                uint8_t *table,
-                                                uint16_t length) {
-  // Determine the number of entries in the table.
-  uint16_t num_entries = length / LOOKUP_ENTRY_SIZE;
-
-  for (uint16_t i = 0; i < num_entries; i++) {
-    uint8_t *entry = table + (i * LOOKUP_ENTRY_SIZE);
-
-    // If the first byte is zero, assume no further valid entries.
-    if (entry[0] == 0) {
-      break;
-    }
-
-    if (!is_valid_uuid4((const char *)entry)) {
-      // Invalid UUID format: assume no further valid data.
-      break;
-    }
-
-    // Compare the first 36 bytes with the given UUID.
-    if (memcmp(entry, uuid, 36) == 0) {
-      // Extract the page number from the two bytes following the UUID.
-      // Assuming little-endian format.
-      uint16_t page = entry[36] | (entry[37] << 8);
-      return page;
-    }
-  }
-
-  // UUID not found in the lookup table.
-  return -1;
-}
-
-/**
- * @brief Retrieves the lookup table sector corresponding to a given UUID.
- *
- * @param uuid         The UUID string to search for. Must be exactly 36
- * characters in length.
- * @param table        Pointer to the lookup table containing the entries.
- * @param table_length Pointer to a variable holding the table's total length in
- * bytes. This could be a pointer to const if the length is not modified.
- *
- * @return The sector number if a matching UUID is found; otherwise, returns a
- * negative error code:
- *         - Returns -1 if the UUID length is invalid.
- *         - Returns -2 if the UUID format is invalid.
- *         - Returns -3 if the UUID was not found in the table.
- */
-static int appmngr_get_lookup_table_sector(const char *uuid, uint8_t *table,
-                                           uint16_t *table_length) {
-  int sector = -3;  // Default to -3 to indicate not found or error
-  // Validate that the UUID is exactly 36 characters
-  if (strlen(uuid) != 36) {
-    DPRINTF("Invalid UUID length: %u. Expected 36 characters.\n",
-            (unsigned)strlen(uuid));
-    return -1;  // Error: invalid UUID length
-  }
-
-  if (!is_valid_uuid4(uuid)) {
-    DPRINTF("Invalid UUID format: %s\n", uuid);
-    return -2;  // Error: invalid UUID format
-  }
-
-  uint16_t num_entries = *table_length / LOOKUP_ENTRY_SIZE;
-  int indexFound = -1;
-
-  // Iterate through each entry in the table.
-  for (uint16_t i = 0; i < num_entries; i++) {
-    uint8_t *entry = table + (i * LOOKUP_ENTRY_SIZE);
-    // If the entry is not empty (first byte is not 0), check if it matches the
-    // UUID.
-    if (entry[0] != 0) {
-      if (memcmp(entry, uuid, 36) == 0) {
-        indexFound = i;
-        break;
-      }
-    }
-  }
-
-  // Return the sector if found.
-  if (indexFound != -1) {
-    uint8_t *entry = table + (indexFound * LOOKUP_ENTRY_SIZE);
-    sector = entry[36] | (entry[37] << 8);
-    DPRINTF("Return entry at index %d with sector %u.\n", indexFound, sector);
-  }
-  return sector;
-}
-
-static int appmngr_update_lookup_table(const char *uuid, uint16_t sector,
-                                       uint8_t *table, uint16_t *table_length) {
-  // Validate that the UUID is exactly 36 characters
-  if (strlen(uuid) != 36) {
-    DPRINTF("Invalid UUID length: %u. Expected 36 characters.\n",
-            (unsigned)strlen(uuid));
-    return -1;
-  }
-
-  if (!is_valid_uuid4(uuid)) {
-    DPRINTF("Invalid UUID format: %s\n", uuid);
-    return -2;
-  }
-
-  uint16_t num_entries = *table_length / LOOKUP_ENTRY_SIZE;
-  int indexFound = -1;
-  int indexEmpty = num_entries;
-
-  // Iterate through each entry in the table.
-  for (uint16_t i = 0; i < num_entries; i++) {
-    uint8_t *entry = table + (i * LOOKUP_ENTRY_SIZE);
-    // If the entry is empty (first byte is 0), record the index if we haven't
-    // found an empty slot yet.
-    if (entry[0] == 0) {
-      if (indexEmpty == -1) {
-        indexEmpty = i;
-      }
-    } else {
-      // Otherwise, compare the stored UUID (first 36 bytes) with the provided
-      // UUID.
-      if (memcmp(entry, uuid, 36) == 0) {
-        indexFound = i;
-        break;
-      }
-    }
-  }
-
-  if (indexFound != -1) {
-    // Entry found: overwrite the sector value.
-    uint8_t *entry = table + (indexFound * LOOKUP_ENTRY_SIZE);
-    entry[36] = sector & 0xFF;
-    entry[37] = (sector >> 8) & 0xFF;
-    DPRINTF("Updated entry at index %d with sector %u.\n", indexFound, sector);
-    return 0;
-  } else if (indexEmpty != -1) {
-    // No matching entry found, but there is an empty slot: append new entry.
-    uint8_t *entry = table + (indexEmpty * LOOKUP_ENTRY_SIZE);
-    memcpy(entry, uuid, 36);  // Copy the UUID exactly (36 bytes)
-    entry[36] = sector & 0xFF;
-    entry[37] = (sector >> 8) & 0xFF;
-    *table_length += LOOKUP_ENTRY_SIZE;
-    DPRINTF("Appended new entry at index %d: UUID = %.*s, sector = %u.\n",
-            indexEmpty, 36, uuid, sector);
-    return 0;
-  } else {
-    // No free slot available in the lookup table.
-    DPRINTF("Lookup table is full; cannot append new entry.\n");
-    return -1;
-  }
-}
-
-/**
- * Delete an entry from the lookup table given its UUID.
- *
- * Each entry in the lookup table is 38 bytes:
- * - The first 36 bytes store the UUID (exactly as a 36-character string)
- * - The next 2 bytes store the sector (page number) in little-endian format.
- *
- * The table is stored as a contiguous block of memory. Valid entries are
- * assumed to be contiguous from the beginning of the table, and an entry is
- * considered empty if its first byte is zero.
- *
- * @param uuid         A pointer to the 36-character UUID string to delete.
- * @param table        Pointer to the lookup table data in memory.
- * @param table_length Total length (in bytes) of the lookup table.
- *
- * @return 0 on success, or -1 if the UUID is not found or if the UUID length is
- * invalid.
- */
-static int appmngr_delete_lookup_entry(const char *uuid, uint8_t *table,
-                                       uint16_t *table_length) {
-  // Validate that the UUID is exactly 36 characters.
-  if (strlen(uuid) != 36) {
-    DPRINTF("Invalid UUID length: %u. Expected 36 characters.\n",
-            (unsigned)strlen(uuid));
-    return -1;
-  }
-  if (!is_valid_uuid4(uuid)) {
-    DPRINTF("Invalid UUID format: %s\n", uuid);
-    return -2;
-  }
-
-  // Calculate the total number of entries in the table.
-  uint16_t num_entries = *table_length / LOOKUP_ENTRY_SIZE;
-  int found_index = -1;
-
-  // Determine how many valid (non-empty) entries are in the table.
-  uint16_t valid_entries = 0;
-  for (uint16_t i = 0; i < num_entries; i++) {
-    uint8_t *entry = table + i * LOOKUP_ENTRY_SIZE;
-    if (entry[0] == 0) {
-      // Assume the table ends when an empty entry is encountered.
-      break;
-    }
-    if (!is_valid_uuid4((const char *)entry)) {
-      // Invalid UUID format: assume no further valid data.
-      break;
-    }
-    valid_entries++;
-  }
-
-  // Search for the entry with the given UUID among the valid entries.
-  for (uint16_t i = 0; i < valid_entries; i++) {
-    uint8_t *entry = table + i * LOOKUP_ENTRY_SIZE;
-    if (memcmp(entry, uuid, 36) == 0) {
-      found_index = i;
-      break;
-    }
-  }
-
-  if (found_index == -1) {
-    // UUID not found in the lookup table.
-    DPRINTF("UUID not found in lookup table.\n");
-    return -1;
-  }
-
-  // If the found entry is not the last one, shift subsequent entries upward to
-  // compact the table.
-  if (found_index < valid_entries - 1) {
-    memmove(table + found_index * LOOKUP_ENTRY_SIZE,  // Destination: position
-                                                      // of the deleted entry
-            table + (found_index + 1) *
-                        LOOKUP_ENTRY_SIZE,  // Source: next entry in the table
-            (valid_entries - found_index - 1) *
-                LOOKUP_ENTRY_SIZE  // Number of bytes to move
-    );
-  }
-
-  // Clear the now-last valid entry.
-  uint8_t *last_entry = table + ((valid_entries - 1) * LOOKUP_ENTRY_SIZE);
-  memset(last_entry, 0, LOOKUP_ENTRY_SIZE);
-
-  *table_length -= LOOKUP_ENTRY_SIZE;
-
-  DPRINTF("Deleted entry for UUID: %s\n", uuid);
-  return 0;
-}
-
-/**
- * Finds the first empty configuration sector from the lookup table provided.
- *
- * @param table  Pointer to the lookup table data (in memory).
- * @param length Pointer to the total length (in bytes) of the lookup table.
- *
- * @return The lowest available sector number (16-bit value) if found,
- *         or 0 if no free sector is available.
- */
-static int16_t appmngr_find_first_empty_config_sector(uint8_t *table,
-                                                      uint16_t *length) {
-  // Calculate the total number of entries in the provided table.
-  uint16_t total_entries = *length / LOOKUP_ENTRY_SIZE;
-  uint16_t valid_entries = 0;
-
-  // Count valid entries until an empty entry is encountered.
-  for (uint16_t i = 0; i < total_entries; i++) {
-    uint8_t *entry = table + (i * LOOKUP_ENTRY_SIZE);
-    if (entry[0] == 0) {  // An entry with first byte 0 is considered empty.
-      break;
-    }
-    if (!is_valid_uuid4((const char *)entry)) {
-      // Invalid UUID format: assume no further valid data.
-      break;
-    }
-    valid_entries++;
-  }
-
-  // Iterate candidate sector numbers from 0 to total_entries
-  for (uint16_t candidate = 0; candidate <= total_entries; candidate++) {
-    bool used = false;
-    for (uint16_t i = 0; i < valid_entries; i++) {
-      uint8_t *entry = table + (i * LOOKUP_ENTRY_SIZE);
-      // Extract the sector number stored in the entry (little-endian)
-      uint16_t sector = entry[36] | (((uint16_t)entry[37]) << 8);
-      if (sector == candidate) {
-        used = true;
-        break;
-      }
-    }
-    if (!used) {
-      return candidate;
-    }
-  }
-
-  // If all candidate sectors appear to be used (unlikely), return 0.
-  return 0;
-}
-
-static int8_t appmngr_persist_app_lookup_table(const uint8_t *table,
-                                               uint16_t table_length) {
+// Erase the lookup table's flash sector and program `table` into it.
+static void appmngr_program_lookup_flash(const uint8_t *table,
+                                         uint16_t table_length) {
   uint32_t flash_start = (uint32_t)&_global_lookup_flash_start;
   uint32_t config_flash_length = (uint32_t)&_global_config_flash_start -
                                  (uint32_t)&_global_lookup_flash_start;
@@ -1758,319 +1553,308 @@ static int8_t appmngr_persist_app_lookup_table(const uint8_t *table,
   }
   restore_interrupts(ints);
   select_flashLockoutEnd();
+}
+
+// <apps folder>/.lookup: the copy of the lookup table on the card
+// (lookupbackup.h), and .lookup.tmp while it is written.
+static void appmngr_lookup_backup_path(char *out, size_t out_size,
+                                       const char *suffix) {
+  snprintf(out, out_size, "%s/.lookup%s",
+           settings_find_entry(gconfig_getContext(), PARAM_APPS_FOLDER)->value,
+           suffix);
+}
+
+static void appmngr_device_id(uint8_t id[LOOKUPBACKUP_ID_SIZE]) {
+  pico_unique_board_id_t board_id;
+  pico_get_unique_board_id(&board_id);
+  memcpy(id, board_id.id, LOOKUPBACKUP_ID_SIZE);
+}
+
+// Save the table about to be programmed to the card, as .lookup.tmp, synced,
+// then renamed. If that fails the old copy is removed, so a stale table can
+// never be restored over a newer one at boot.
+static void appmngr_write_lookup_backup(const uint8_t *table,
+                                        uint16_t table_length) {
+  char tmp_path[256];
+  char path[256];
+  appmngr_lookup_backup_path(tmp_path, sizeof(tmp_path), ".tmp");
+  appmngr_lookup_backup_path(path, sizeof(path), "");
+  size_t size = LOOKUPBACKUP_HEADER_SIZE + (size_t)table_length;
+  uint8_t *data = malloc(size);
+  FRESULT res = FR_NOT_ENOUGH_CORE;
+  appmngr_fs_lock();
+  if (data != NULL) {
+    uint8_t id[LOOKUPBACKUP_ID_SIZE];
+    appmngr_device_id(id);
+    lookupbackup_encode(data, table, table_length, id);
+    FIL file;
+    UINT written = 0;
+    res = f_open(&file, tmp_path, FA_WRITE | FA_CREATE_ALWAYS);
+    if (res == FR_OK) {
+      res = f_write(&file, data, size, &written);
+      if (res == FR_OK) {
+        res = f_sync(&file);
+      }
+      FRESULT closed = f_close(&file);
+      if (res == FR_OK) {
+        res = closed;
+      }
+      if (res == FR_OK && written != size) {
+        res = FR_DISK_ERR;
+      }
+    }
+    if (res == FR_OK) {
+      f_unlink(path);
+      res = f_rename(tmp_path, path);
+    }
+  }
+  if (res != FR_OK) {
+    f_unlink(tmp_path);
+    f_unlink(path);
+    DPRINTF("Lookup backup not written (%d); old copy removed\n", res);
+  }
+  appmngr_fs_unlock();
+  free(data);
+}
+
+// At boot: a valid copy on the card that differs from the table in flash
+// means a rewrite of the flash sector was cut short (or the card copy is the
+// newer one, written just before the cut): program it back.
+static bool appmngr_restore_lookup_backup(uint8_t *table,
+                                          uint16_t *table_length) {
+  char path[256];
+  appmngr_lookup_backup_path(path, sizeof(path), "");
+  size_t max = LOOKUPBACKUP_HEADER_SIZE + LOOKUP_TABLE_SIZE;
+  uint8_t *data = malloc(max);
+  if (data == NULL) {
+    return false;
+  }
+  bool restored = false;
+  appmngr_fs_lock();
+  FIL file;
+  UINT read = 0;
+  FRESULT res = f_open(&file, path, FA_READ);
+  if (res == FR_OK) {
+    res = f_read(&file, data, max, &read);
+    f_close(&file);
+  }
+  appmngr_fs_unlock();
+  if (res == FR_OK) {
+    uint8_t id[LOOKUPBACKUP_ID_SIZE];
+    appmngr_device_id(id);
+    int length = lookupbackup_validate(data, read, id, LOOKUP_TABLE_SIZE);
+    const uint8_t *copy = data + LOOKUPBACKUP_HEADER_SIZE;
+    if (length >= 0 &&
+        (length != *table_length || memcmp(copy, table, (size_t)length) != 0)) {
+      DPRINTF(
+          "Lookup table in flash (%u bytes) differs from the copy on the "
+          "card (%d bytes): restoring the copy\n",
+          *table_length, length);
+      memset(table, 0, LOOKUP_TABLE_SIZE);
+      memcpy(table, copy, (size_t)length);
+      *table_length = (uint16_t)length;
+      appmngr_program_lookup_flash(table, *table_length);
+      restored = true;
+    }
+  }
+  free(data);
+  return restored;
+}
+
+static int8_t appmngr_persist_app_lookup_table(const uint8_t *table,
+                                               uint16_t table_length) {
+  // The table is one flash sector. Anything longer would be programmed into
+  // the next sector, the global settings.
+  if (table_length > LOOKUP_TABLE_SIZE) {
+    DPRINTF("Lookup table of %u bytes does not fit its %u-byte sector\n",
+            table_length, (unsigned)LOOKUP_TABLE_SIZE);
+    return -1;
+  }
+  // The card copy first: the flash rewrite below is erase then program, and
+  // a power cut in between would otherwise lose every app's settings slot.
+  appmngr_write_lookup_backup(table, table_length);
+  appmngr_program_lookup_flash(table, table_length);
   return 0;
 }
 
 // -----------------------------------------------------------------------------
-// Sync lookup table with JSON files on SD card
+// Repair the lookup table at boot
 // -----------------------------------------------------------------------------
+// The table is no longer filled from the .json files on the card: an app gets
+// a config sector the first time it is launched (appmngr_assign_launch_sector).
+// What is left at boot is the repair of a table written by older firmware.
 void appmngr_sync_lookup_table() {
-  // 1) Load current lookup table into RAM buffer
-  uint8_t table[4096];  // Enough for ~107 entries (4096/38)
+  uint8_t table[LOOKUP_TABLE_SIZE];
   memset(table, 0, sizeof(table));
   uint16_t table_len = 0;
   appmngr_load_apps_lookup_table(table, &table_len);
-  bool changed = false;
-
-  // 2) Open apps folder from settings
-  char apps_folder[256] = {0};
-  snprintf(apps_folder, sizeof(apps_folder), "%s",
-           settings_find_entry(gconfig_getContext(), PARAM_APPS_FOLDER)->value);
-
-  DIR dir;
-  FRESULT res = f_opendir(&dir, apps_folder);
-  if (res != FR_OK) {
-    DPRINTF("sync: cannot open apps folder %s (err=%d)\n", apps_folder, res);
-    return;
-  }
-
-  FILINFO fno;
-  for (;;) {
-    res = f_readdir(&dir, &fno);
-    if (res != FR_OK || fno.fname[0] == '\0') break;  // end
-
-    // Skip the catalog file and non-.json files
-    if (strcmp(fno.fname, "apps.json") == 0) continue;
-    char *ext = strrchr(fno.fname, '.');
-    if (!ext || strcasecmp(ext, ".json") != 0) continue;
-
-    // Base name must be 36-char UUID
-    char base[64];
-    strncpy(base, fno.fname, sizeof(base));
-    base[sizeof(base) - 1] = '\0';
-    char *dot = strrchr(base, '.');
-    if (dot) *dot = '\0';
-    if (strlen(base) != 36) continue;
-    if (!is_valid_uuid4(base)) continue;
-
-    // Check if already present in table
-    int16_t page = appmngr_get_page_number_for_uuid(base, table, table_len);
-    if (page >= 0) {
-      // Already present
-      continue;
-    }
-
-    // Parse the JSON to populate app_info using existing code
-    char path[256];
-    snprintf(path, sizeof(path), "%s/%s", apps_folder, fno.fname);
-
-    FIL fil;
-    if (f_open(&fil, path, FA_READ) != FR_OK) {
-      DPRINTF("sync: cannot open %s\n", path);
-      continue;
-    }
-    // Read file content into buffer
-    char json_buf[MAXIMUM_APP_INFO_SIZE];
-    UINT br = 0;
-    FRESULT rr = f_read(&fil, json_buf, sizeof(json_buf) - 1, &br);
-    f_close(&fil);
-    if (rr != FR_OK) {
-      DPRINTF("sync: cannot read %s (err=%d)\n", path, rr);
-      continue;
-    }
-    json_buf[br] = '\0';
-
-    if (set_app_info(json_buf) != DOWNLOAD_OK) {
-      DPRINTF("sync: parse failed for %s\n", path);
-      continue;
-    }
-
-    // app_info.uuid should now be set; add a new entry with next free sector
-    int16_t next_sector =
-        appmngr_find_first_empty_config_sector(table, &table_len);
-    if (next_sector < 0) next_sector = 0;  // fallback
-
-    if (appmngr_update_lookup_table(app_info.uuid, (uint16_t)next_sector, table,
-                                    &table_len) == 0) {
-      DPRINTF("sync: added %.*s -> sector %d\n", 36, app_info.uuid,
-              next_sector);
-      changed = true;
-    } else {
-      DPRINTF("sync: failed to add %.*s\n", 36, app_info.uuid);
-    }
-  }
-  f_closedir(&dir);
-
-  // 3) Persist any updates
-  if (changed) {
+  appmngr_restore_lookup_backup(table, &table_len);
+  // Firmware before v2.5.0 handed out sectors past the last config sector
+  // once more than 30 apps were installed. Drop those entries, and any that
+  // share a sector, so their apps get a sector of their own at their next
+  // launch.
+  if (lookuptable_sanitize(table, &table_len, appmngr_config_sector_count()) >
+      0) {
     appmngr_persist_app_lookup_table(table, table_len);
   } else {
     DPRINTF("sync: no changes, nothing to persist\n");
   }
 }
 
-/*
-  Reads a UF2 file from the microSD card, ignores each block’s targetAddr,
-  and writes each block’s payload linearly into flash starting at flashAddress.
-  Before writing, it erases [flashAddress..(flashAddress + flashSize)).
+// Give the app being launched its config sector and make it the most recently
+// launched entry of the lookup table, which is kept in launch order. An app
+// that has a sector keeps it and its settings. One that has none gets the
+// lowest free sector; when all are taken, the least recently launched app that
+// is not pinned gives its sector up after its settings are saved to the card.
+// The sector is then filled with the launched app's own saved settings, if it
+// has any on the card, or erased for its defaults.
+//
+// The order makes a power cut at any point harmless: the evicted settings are
+// on the card before its entry goes, and the launched app's entry is added only
+// after its sector holds its own settings. A cut in between leaves a sector no
+// entry points at, which the next launch hands out again.
+static download_launch_err_t appmngr_assign_launch_sector(const char *uuid) {
+  uint8_t *table = malloc(LOOKUP_TABLE_SIZE);
+  if (table == NULL) {
+    DPRINTF("Launch: no memory to read the lookup table\n");
+    return DOWNLOAD_LAUNCHAPP_NOCONFIGSECTOR_ERROR;
+  }
+  memset(table, 0, LOOKUP_TABLE_SIZE);
+  uint16_t table_length = 0;
+  appmngr_load_apps_lookup_table(table, &table_length);
+  uint16_t num_sectors = appmngr_config_sector_count();
+  download_launch_err_t result = DOWNLOAD_LAUNCHAPP_NOCONFIGSECTOR_ERROR;
 
-  We no longer write one UF2 block at a time. Instead, we accumulate multiple
-  payloads from consecutive UF2 blocks into a dynamic buffer of size
-  'userPageSize' until that buffer is full or we run out of data.
-  Then we flush that buffer to the flash.
+  int moved = lookuptable_move_to_end(uuid, table, table_length);
+  if (moved >= 0) {
+    if (moved > 0 && appmngr_persist_app_lookup_table(table, table_length)) {
+      DPRINTF("Launch: could not save the launch order\n");
+    }
+    DPRINTF("Launch: %s keeps sector %d\n", uuid,
+            lookuptable_get_sector(uuid, table, &table_length));
+    free(table);
+    return DOWNLOAD_LAUNCHAPP_OK;
+  }
 
-  If the leftover region in flash is smaller than the userPageSize,
-  we do partial writes, ensuring we never write beyond the allocated region.
+  int16_t sector =
+      lookuptable_find_first_empty_sector(table, &table_length, num_sectors);
+  if (sector < 0) {
+    // Every sector is taken. The DEV APP keeps its settings while the
+    // Development channel is selected, so a developer's settings survive
+    // between deploys.
+    const char *pinned[] = {devapi_isEnabled() ? DEVAPI_DEV_APP_UUID : NULL};
+    int victim = lookuptable_least_recent(table, table_length, pinned, 1);
+    if (victim < 0) {
+      DPRINTF("Launch: every config sector belongs to a pinned app\n");
+      goto done;
+    }
+    char victim_uuid[37] = {0};
+    memcpy(victim_uuid, table + (victim * LOOKUP_ENTRY_SIZE), 36);
+    int victim_sector =
+        lookuptable_get_sector(victim_uuid, table, &table_length);
+    if (victim_sector < 0 || victim_sector >= num_sectors ||
+        appmngr_save_settings_to_card(victim_uuid, (uint8_t)victim_sector) !=
+            0) {
+      DPRINTF("Launch: cannot move the settings of %s to the card\n",
+              victim_uuid);
+      goto done;
+    }
+    if (lookuptable_delete(victim_uuid, table, &table_length) != 0 ||
+        appmngr_persist_app_lookup_table(table, table_length) != 0) {
+      DPRINTF("Launch: cannot remove %s from the lookup table\n", victim_uuid);
+      goto done;
+    }
+    DPRINTF("Launch: sector %d of %s moved to the card\n", victim_sector,
+            victim_uuid);
+    sector = (int16_t)victim_sector;
+  }
 
-  Parameters:
-    - filename: Path to the UF2 file on SD card.
-    - flashAddress: Start address in RP2040 flash memory.
-    - flashSize: Size of the region to erase/write (must be a multiple of 4096).
-    - userPageSize: The chunk size for flash writes (must be a multiple of 256).
+  if (appmngr_restore_settings_from_card(uuid, (uint8_t)sector) != 0) {
+    DPRINTF("Launch: cannot prepare sector %d\n", sector);
+    goto done;
+  }
+  if (lookuptable_update(uuid, (uint16_t)sector, table, &table_length) != 0 ||
+      appmngr_persist_app_lookup_table(table, table_length) != 0) {
+    DPRINTF("Launch: cannot add %s to the lookup table\n", uuid);
+    goto done;
+  }
+  DPRINTF("Launch: %s gets sector %d\n", uuid, sector);
+  result = DOWNLOAD_LAUNCHAPP_OK;
+done:
+  free(table);
+  return result;
+}
 
-  Returns FRESULT error codes (FR_OK if successful, etc.).
+_Static_assert(APP_FLASH_COPY_CHUNK_SIZE == UF2COPY_SECTOR_SIZE,
+               "the copy works in flash sectors");
+// Working space for the launch copy and for writing the upgrader. Static, not
+// malloc'd: see APP_FLASH_COPY_CHUNK_SIZE in appmngr.h.
+static uint8_t appmngr_sector_buf[APP_FLASH_COPY_CHUNK_SIZE];
 
-  Steps:
-    1) Verify userPageSize is multiple of 256.
-    2) Open UF2 file.
-    3) Erase [flashAddress..flashAddress+flashSize).
-    4) Repeatedly read 512-byte UF2 blocks from file, parse out the payload,
-       and accumulate that payload in a dynamic buffer up to userPageSize.
-    5) Once the buffer is full (or no more data), write it to flash.
-    6) If flash region remains but we have partial leftover data < userPageSize,
-       do a final partial write.
+// FatFs and flash access for uf2copy_run(). Flash is out of XIP during an
+// erase or a program, so each runs with interrupts off.
+static int appmngr_uf2_read(void *ctx, uint8_t *buf, uint32_t len,
+                            uint32_t *got) {
+  UINT n = 0;
+  if (f_read((FIL *)ctx, buf, len, &n) != FR_OK) {
+    return 1;
+  }
+  *got = n;
+  return 0;
+}
 
-  NOTE:
-    - We do partial writes if leftover flash size is smaller than userPageSize.
-    - The user must ensure enough RAM is available to allocate userPageSize
-  bytes.
-*/
+static int appmngr_uf2_rewind(void *ctx) {
+  return f_lseek((FIL *)ctx, 0) == FR_OK ? 0 : 1;
+}
 
-static FRESULT __not_in_flash_func(storeUF2FileToFlash)(const char *filename,
-                                                        uint32_t flashAddress,
-                                                        uint32_t flashSize,
-                                                        uint32_t userPageSize) {
+static void appmngr_uf2_erase(void *ctx, uint32_t offset, uint32_t len) {
+  (void)ctx;
+  uint32_t ints = save_and_disable_interrupts();
+  flash_range_erase(offset, len);
+  restore_interrupts(ints);
+}
+
+static void appmngr_uf2_program(void *ctx, uint32_t offset, const uint8_t *data,
+                                uint32_t len) {
+  (void)ctx;
+  uint32_t ints = save_and_disable_interrupts();
+  flash_range_program(offset, data, len);
+  restore_interrupts(ints);
+}
+
+// Copies a microfirmware's UF2 file into the microfirmware slot, in the order
+// uf2copy.h describes: until the copy has finished, the slot boots Booster.
+// Returns DOWNLOAD_LAUNCHAPP_OK, DOWNLOAD_LAUNCHAPP_FILE_ERROR when the file
+// cannot be opened (the slot is untouched), or DOWNLOAD_LAUNCHAPP_COPY_ERROR
+// when the copy stopped partway (the slot boots Booster).
+static download_launch_err_t appmngr_copy_app_to_slot(const char *filename) {
   FIL file;
-  FRESULT res;
-  FSIZE_t uf2FileSize;
-  UINT bytesRead;
-
-  // Check page size
-  if (userPageSize == 0 || (userPageSize % FLASH_PAGE_SIZE) != 0) {
-    DPRINTF("Error: userPageSize (%u) is not a multiple of %u.\n", userPageSize,
-            FLASH_PAGE_SIZE);
-    return FR_INVALID_PARAMETER;
+  FRESULT fres = f_open(&file, filename, FA_READ);
+  if (fres != FR_OK) {
+    DPRINTF("Error opening %s: %d\n", filename, fres);
+    return DOWNLOAD_LAUNCHAPP_FILE_ERROR;
   }
 
-  // Open file
-  res = f_open(&file, filename, FA_READ);
-  if (res != FR_OK) {
-    DPRINTF("Error opening file %s: %d\n", filename, res);
-    return res;
-  }
+  // The stub is Booster's own boot2 and vector table, from the start of its
+  // region: the same boot2 every microfirmware carries.
+  uint8_t stub[UF2COPY_STUB_SIZE];
+  const uint8_t *booster = (const uint8_t *)&__flash_binary_start;
+  uf2copy_buildStub(stub, booster, booster + UF2COPY_BOOT2_SIZE);
 
-  // Erase region
-  uint32_t offset = flashAddress - XIP_BASE;
-  if (flashSize == 0) {
-    // If user passed 0, nothing to do?
-    f_close(&file);
-    return FR_INVALID_PARAMETER;
-  }
-
-  DPRINTF("Erasing %u bytes of flash at offset 0x%X\n", flashSize, offset);
-  {
-    uint32_t ints = save_and_disable_interrupts();
-    flash_range_erase(offset, flashSize);
-    restore_interrupts(ints);
-  }
-
-  uf2FileSize = f_size(&file);
-  DPRINTF("UF2 file size: %u bytes\n", (unsigned int)uf2FileSize);
-  DPRINTF("Erased %u bytes of flash at offset 0x%X\n", (unsigned int)flashSize,
-          offset);
-
-  // Static staging buffer, deliberately not malloc'd -- see
-  // APP_FLASH_COPY_CHUNK_SIZE in appmngr.h for why (heap fragmentation at
-  // launch time made a large contiguous allocation unreliable).
-  static uint8_t accumBufStorage[APP_FLASH_COPY_CHUNK_SIZE];
-  if (userPageSize > sizeof(accumBufStorage)) {
-    DPRINTF("Chunk size %u exceeds the %u byte staging buffer\n", userPageSize,
-            (unsigned)sizeof(accumBufStorage));
-    f_close(&file);
-    return FR_INVALID_PARAMETER;
-  }
-  uint8_t *accumBuf = accumBufStorage;
-
-  // We'll keep track of how many bytes we have in accumBuf.
-  uint32_t accumUsed = 0;
-
-  // We'll read the file block by block (512 bytes each) and parse payload.
-  uint32_t currentOffset = offset;
-  bool done = false;
-
-  while (!done) {
-    // Attempt to read 512 bytes for a UF2 block.
-    uint8_t uf2block[UF2_BLOCK_SIZE];
-    res = f_read(&file, uf2block, sizeof(uf2block), &bytesRead);
-
-    if (res != FR_OK) {
-      DPRINTF("Error reading file: %d\n", res);
-      break;  // error
-    }
-    if (bytesRead == 0) {
-      // End of file.
-      done = true;
-    } else if (bytesRead < UF2_BLOCK_SIZE) {
-      DPRINTF("Warning: incomplete UF2 block (%u bytes). Ignored.\n",
-              bytesRead);
-      done = true;
-    } else {
-      // parse the block
-      const uint32_t UF2_MAGIC_START0 = 0x0A324655;
-      const uint32_t UF2_MAGIC_START1 = 0x9E5D5157;
-      uint32_t magic0 = ((uint32_t *)uf2block)[0];
-      uint32_t magic1 = ((uint32_t *)uf2block)[1];
-
-      if (magic0 != UF2_MAGIC_START0 || magic1 != UF2_MAGIC_START1) {
-        DPRINTF("Invalid UF2 magic. Skipping block.\n");
-        continue;  // skip
-      }
-
-      uint32_t payloadSize = ((uint32_t *)uf2block)[4];
-      if (payloadSize == 0 || payloadSize > 476) {
-        DPRINTF("Invalid UF2 payload size: %u. Skipping.\n", payloadSize);
-        continue;
-      }
-
-      // The payload is located at offset 32 in the block.
-      uint8_t *payload = uf2block + 32;
-
-      // Now we have 'payloadSize' bytes to accumulate in accumBuf.
-      // We might have to break it up if there's not enough space left.
-      uint32_t payloadPos = 0;
-
-      while (payloadPos < payloadSize) {
-        uint32_t leftover = payloadSize - payloadPos;
-        uint32_t spaceInBuf = userPageSize - accumUsed;
-        uint32_t toCopy = (leftover < spaceInBuf) ? leftover : spaceInBuf;
-
-        // Copy to the accumulation buffer.
-        memcpy(accumBuf + accumUsed, payload + payloadPos, toCopy);
-        accumUsed += toCopy;
-        payloadPos += toCopy;
-
-        // If accumBuf is full, flush it to flash.
-        if (accumUsed == userPageSize) {
-          // Check leftover region.
-          uint32_t leftoverRegion = (offset + flashSize) - currentOffset;
-          if (leftoverRegion == 0) {
-            // No more space in flash.
-            done = true;
-            break;
-          }
-
-          // We'll write either userPageSize or leftoverRegion if smaller.
-          uint32_t chunk =
-              (userPageSize <= leftoverRegion) ? userPageSize : leftoverRegion;
-
-          // Program the flash with 'chunk' bytes.
-          {
-            uint32_t ints = save_and_disable_interrupts();
-            flash_range_program(currentOffset, accumBuf, chunk);
-            restore_interrupts(ints);
-          }
-
-          currentOffset += chunk;
-          accumUsed = 0;  // reset for next round
-
-          // If leftoverRegion < userPageSize, we wrote partially.
-          if (chunk < userPageSize) {
-            done = true;
-            break;
-          }
-        }
-
-        if (done) break;
-      }
-    }
-
-    if (done) {
-      // either end of file or no more flash space
-      break;
-    }
-  }
-
-  // If we have leftover data in accumBuf, flush it partially.
-  if (accumUsed > 0 && !res) {
-    // leftover region check
-    uint32_t leftoverRegion = (offset + flashSize) - currentOffset;
-    if (leftoverRegion > 0) {
-      uint32_t chunk =
-          (accumUsed <= leftoverRegion) ? accumUsed : leftoverRegion;
-      // Program partial.
-      {
-        uint32_t ints = save_and_disable_interrupts();
-        flash_range_program(currentOffset, accumBuf, chunk);
-        restore_interrupts(ints);
-      }
-      currentOffset += chunk;
-    }
-  }
-
-  // accumBuf is static storage, not heap: nothing to free.
+  uf2copy_io_t io = {&file, appmngr_uf2_read, appmngr_uf2_rewind,
+                     appmngr_uf2_erase, appmngr_uf2_program};
+  uint32_t slotStart = (uint32_t)&_storage_flash_start;
+  uint32_t slotSize = (uint32_t)&__flash_binary_start - slotStart;
+  DPRINTF("Copying %s into the slot, %lu bytes at 0x%08lX\n", filename,
+          (unsigned long)slotSize, (unsigned long)slotStart);
+  uf2copy_result_t res = uf2copy_run(&io, slotStart - XIP_BASE, slotSize, stub,
+                                     appmngr_sector_buf);
   f_close(&file);
-
-  return FR_OK;
+  if (res != UF2COPY_OK) {
+    DPRINTF("Copy failed: %d\n", res);
+    return DOWNLOAD_LAUNCHAPP_COPY_ERROR;
+  }
+  return DOWNLOAD_LAUNCHAPP_OK;
 }
 
 int8_t appmngr_erase_app_lookup_table() {
@@ -2100,8 +1884,10 @@ download_delete_err_t appmngr_delete_app(const char *uuid) {
   // Delete the app with the uuid given.
   DPRINTF("Deleting app with UUID: %s\n", uuid);
 
-  // First, check that the uuid is a valid uuid
-  if (strlen(uuid) != 36) {
+  // The whole string must be a UUID: it becomes a path, and with relative
+  // paths on, "../../x" or "<uuid>/../../x" would reach files outside the apps
+  // folder.
+  if (!uuid_is_exact4(uuid)) {
     DPRINTF("Invalid UUID: %s\n", uuid);
     return DOWNLOAD_DELETEAPP_NOTUUID_ERROR;
   }
@@ -2129,7 +1915,7 @@ download_delete_err_t appmngr_delete_app(const char *uuid) {
   f_unlink(binary_filename);
 
   // The development app can also have a deploy API upload beside its catalog
-  // binary (D-10). Deleting the app is the documented way back to the probe
+  // binary. Deleting the app is the documented way back to the probe
   // workflow, so the upload goes too.
   if (strcmp(uuid, DEVAPI_DEV_APP_UUID) == 0) {
     char upload_filename[sizeof(binary_filename)] = {0};
@@ -2137,6 +1923,9 @@ download_delete_err_t appmngr_delete_app(const char *uuid) {
     DPRINTF("Deleting development upload %s\n", upload_filename);
     f_unlink(upload_filename);
   }
+
+  // Settings kept on the card while the app had no config sector go too.
+  appmngr_delete_settings_file(uuid);
 
   // Now delete the entry in the app lookup table
   uint8_t *table = malloc(FLASH_SECTOR_SIZE);
@@ -2148,7 +1937,7 @@ download_delete_err_t appmngr_delete_app(const char *uuid) {
   appmngr_load_apps_lookup_table(table, &table_length);
 
   // Delete and update entry in the table
-  int res = appmngr_delete_lookup_entry(uuid, table, &table_length);
+  int res = lookuptable_delete(uuid, table, &table_length);
 
   // Persist the table if ok
   if (res == -1) {
@@ -2200,15 +1989,24 @@ appmngr_config_erase_t appmngr_erase_app_config(const char *uuid) {
   }
   uint16_t table_length = 0;
   appmngr_load_apps_lookup_table(table, &table_length);
-  int sector = appmngr_get_lookup_table_sector(uuid, table, &table_length);
+  int sector = lookuptable_get_sector(uuid, table, &table_length);
   free(table);
+  // Settings saved on the card count as the app's settings too.
+  bool removed_file = appmngr_delete_settings_file(uuid);
   if (sector == LOOKUP_SECTOR_NOT_FOUND) {
     DPRINTF("Config erase: no config sector assigned to %s\n", uuid);
-    return APPMNGR_CONFIG_NOT_ASSIGNED;
+    return removed_file ? APPMNGR_CONFIG_ERASED : APPMNGR_CONFIG_NOT_ASSIGNED;
   }
   if (sector < 0) {
     DPRINTF("Config erase: lookup failed for %s (%d)\n", uuid, sector);
     return APPMNGR_CONFIG_ERASE_FAILED;
+  }
+  if (sector >= appmngr_config_sector_count()) {
+    // Never an address: a sector past the last one is the lookup table or
+    // the global settings. The next boot's sync drops the entry.
+    DPRINTF("Config erase: %s points at sector %d, which does not exist\n",
+            uuid, sector);
+    return APPMNGR_CONFIG_NOT_ASSIGNED;
   }
   if (appmngr_delete_config_sector((uint8_t)sector) != 0) {
     DPRINTF("Config erase: could not erase sector %d\n", sector);
@@ -2237,7 +2035,7 @@ download_launch_err_t appmngr_launch_app() {
   DPRINTF("Launch app with UUID: %s\n", launch_app_uuid);
 
   // First, check that the uuid is a valid uuid
-  if (!is_valid_uuid4(launch_app_uuid)) {
+  if (!uuid_is_valid4(launch_app_uuid)) {
     DPRINTF("Invalid UUID: %s\n", launch_app_uuid);
     return DOWNLOAD_LAUNCHAPP_NOTUUID_ERROR;
   }
@@ -2246,6 +2044,14 @@ download_launch_err_t appmngr_launch_app() {
   if (!sdcard_info.ready) {
     DPRINTF("SD card not ready\n");
     return DOWNLOAD_LAUNCHAPP_SDCARDNOTREADY_ERROR;
+  }
+
+  // Settings first: a launch that cannot give the app a config sector stops
+  // here, with nothing flashed and the network still up.
+  download_launch_err_t sector_err =
+      appmngr_assign_launch_sector(launch_app_uuid);
+  if (sector_err != DOWNLOAD_LAUNCHAPP_OK) {
+    return sector_err;
   }
 
   DPRINTF("Preparing runtime for app launch\n");
@@ -2269,17 +2075,17 @@ download_launch_err_t appmngr_launch_app() {
   //  1. Probe workflow: the developer put the microfirmware in the slot
   //     themselves, with a debug probe or the USB/BOOTSEL dance. Launching must
   //     leave the slot alone, or it destroys exactly what they wanted to run.
-  //  2. Deploy API upload (EPIC-05): <uuid>.dev.uf2. That file IS what the
+  //  2. Deploy API upload: <uuid>.dev.uf2. That file IS what the
   //     developer wants to run, so it is flashed like any other app.
   //  3. Catalog binary: <uuid>.uf2, written when the DEV APP is installed from
   //     the Development channel, which the deploy API requires. A plain launch
-  //     never flashes it (D-10). "Restore and launch" on the Apps page does, on
+  //     never flashes it. "Restore and launch" on the Apps page does, on
   //     purpose, after deleting the upload and erasing the app's config.
   //
   // Uploads used to be written over <uuid>.uf2, so cases 2 and 3 looked the
   // same: from v2.3.0 to v2.4.1, launching with the DEV APP installed flashed
   // the placeholder over a probe-flashed microfirmware, and the placeholder
-  // handed straight back to Booster (EPIC-11).
+  // handed straight back to Booster.
   bool isDevApp = strcmp(launch_app_uuid, DEVAPI_DEV_APP_UUID) == 0;
   bool flashIt = true;
   const char *flash_filename = binary_filename;
@@ -2300,11 +2106,12 @@ download_launch_err_t appmngr_launch_app() {
   launch_restore = false;
 
   if (flashIt) {
-    DPRINTF("Copying app binary %s to flash memory\n", flash_filename);
-    int res = storeUF2FileToFlash(
-        flash_filename, (uint32_t)&_storage_flash_start,
-        (uint32_t)&__flash_binary_start - (uint32_t)&_storage_flash_start,
-        APP_FLASH_COPY_CHUNK_SIZE);
+    // A failed copy leaves the boot target as it is: the device must not boot
+    // what is in the slot as this app.
+    download_launch_err_t copy_err = appmngr_copy_app_to_slot(flash_filename);
+    if (copy_err != DOWNLOAD_LAUNCHAPP_OK) {
+      return copy_err;
+    }
   } else {
     DPRINTF("Development app launched; nothing uploaded, leaving flash alone\n");
   }
@@ -2322,7 +2129,7 @@ download_launch_err_t appmngr_launch_app() {
   return DOWNLOAD_LAUNCHAPP_OK;
 }
 
-download_err_t appmngr_start_download(const char *url) {
+static download_err_t appmngr_start_download_open(const char *url) {
   // Download the app binary from the URL in the app_info struct
   // The binary is saved to the SD card in the apps folder
   // The filename must be the UUID of the app with the .bin extension
@@ -2374,8 +2181,9 @@ download_err_t appmngr_start_download(const char *url) {
     appmngr_fs_unlock();
     return DOWNLOAD_CANNOTOPENFILE_ERROR;
   }
-  appmngr_fs_unlock();
 
+  // Still under the lock: FatFs has one sector window for every file
+  // (FF_FS_TINY), and a page served meanwhile reads the card too.
   UINT bw = 0;
   const uint8_t probe_byte = 0;
   res = f_write(&file, &probe_byte, sizeof(probe_byte), &bw);
@@ -2383,6 +2191,7 @@ download_err_t appmngr_start_download(const char *url) {
     DPRINTF("Error probing file write %s: %i (wrote %u of %u)\n", filename, res,
             (unsigned)bw, (unsigned)sizeof(probe_byte));
     f_close(&file);
+    appmngr_fs_unlock();
     return DOWNLOAD_CANNOTWRITEFILE_ERROR;
   }
   res = f_lseek(&file, 0);
@@ -2392,8 +2201,10 @@ download_err_t appmngr_start_download(const char *url) {
   if (res != FR_OK) {
     DPRINTF("Error resetting temp file %s: %i\n", filename, res);
     f_close(&file);
+    appmngr_fs_unlock();
     return DOWNLOAD_CANNOTWRITEFILE_ERROR;
   }
+  appmngr_fs_unlock();
 
   // A fresh download starts the hop count over; a redirect re-issue must not.
   // The pending/settling flags must be cleared too: if a previous attempt died
@@ -2415,7 +2226,7 @@ download_err_t appmngr_start_download(const char *url) {
     // download_type must stay as it was: passing a URL through the branch
     // below would silently reclassify a microfirmware download as a firmware
     // OTA, which changes the size cap and the completion handling.
-    if (parse_url(redirect_url, &components) != 0) {
+    if (urlparse_parse(redirect_url, &components) != 0) {
       DPRINTF("Error parsing redirect URL: %s\n", redirect_url);
       return DOWNLOAD_CANNOTPARSEURL_ERROR;
     }
@@ -2428,7 +2239,7 @@ download_err_t appmngr_start_download(const char *url) {
       download_error = DOWNLOAD_OK;
     }
   } else if (url == NULL || strlen(url) == 0) {
-    if (parse_url(app_info.binary, &components) != 0) {
+    if (urlparse_parse(app_info.binary, &components) != 0) {
       DPRINTF("Error parsing URL of app_info.binary: %s\n", app_info.binary);
       return DOWNLOAD_CANNOTPARSEURL_ERROR;
     }
@@ -2437,7 +2248,7 @@ download_err_t appmngr_start_download(const char *url) {
     download_status = DOWNLOAD_STATUS_STARTED;
     download_error = DOWNLOAD_OK;
   } else {
-    if (parse_url(url, &components) != 0) {
+    if (urlparse_parse(url, &components) != 0) {
       DPRINTF("Error parsing URL of url arg: %s\n", url);
       return DOWNLOAD_CANNOTPARSEURL_ERROR;
     }
@@ -2446,6 +2257,7 @@ download_err_t appmngr_start_download(const char *url) {
     download_firmware_status = DOWNLOAD_STATUS_STARTED;
     download_firmware_error = DOWNLOAD_OK;
   }
+  headers_refused = DOWNLOAD_OK;
   // Every hop restarts the destination file, so the counters restart with it.
   // This must NOT be limited to a fresh download: a redirect re-issue and a
   // retry both truncate and rewrite the same file.
@@ -2520,6 +2332,36 @@ download_err_t appmngr_start_download(const char *url) {
   return DOWNLOAD_OK;
 }
 
+download_err_t appmngr_start_download(const char *url) {
+  download_err_t err = appmngr_start_download_open(url);
+  if (err != DOWNLOAD_OK) {
+    // Whatever stopped the start, the temporary file is not left open: the
+    // caller reports the failure and a retry opens it again.
+    appmngr_close_download_file();
+  }
+  return err;
+}
+
+bool appmngr_download_in_flight(void) {
+  if (request.url != NULL && !request.complete) {
+    return true;
+  }
+  download_status_t states[] = {download_status, download_firmware_status};
+  for (size_t i = 0; i < sizeof(states) / sizeof(states[0]); i++) {
+    switch (states[i]) {
+      case DOWNLOAD_STATUS_REQUESTED:
+      case DOWNLOAD_STATUS_NOT_STARTED:
+      case DOWNLOAD_STATUS_STARTED:
+      case DOWNLOAD_STATUS_IN_PROGRESS:
+      case DOWNLOAD_STATUS_COMPLETED:
+        return true;
+      default:
+        break;
+    }
+  }
+  return false;
+}
+
 download_poll_t appmngr_poll_download_app() {
   if (!request.complete) {
     async_context_poll(cyw43_arch_async_context());
@@ -2554,10 +2396,13 @@ download_poll_t appmngr_poll_download_app() {
     if (retry_err != DOWNLOAD_OK) {
       DPRINTF("Hop retry failed to start: %d\n", retry_err);
       appmngr_cleanup_tmp_download_file();
-      if (download_type == DOWNLOAD_TYPE_FIRMWARE)
+      if (download_type == DOWNLOAD_TYPE_FIRMWARE) {
         download_firmware_status = DOWNLOAD_STATUS_FAILED;
-      else
+        download_firmware_error = retry_err;
+      } else {
         download_status = DOWNLOAD_STATUS_FAILED;
+        download_error = retry_err;
+      }
       return DOWNLOAD_POLL_COMPLETED;
     }
     return DOWNLOAD_POLL_CONTINUE;
@@ -2593,10 +2438,13 @@ download_poll_t appmngr_poll_download_app() {
     following_redirect = false;
     if (err != DOWNLOAD_OK) {
       DPRINTF("Redirect re-issue failed: %d\n", err);
-      if (download_type == DOWNLOAD_TYPE_FIRMWARE)
+      if (download_type == DOWNLOAD_TYPE_FIRMWARE) {
         download_firmware_status = DOWNLOAD_STATUS_FAILED;
-      else
+        download_firmware_error = err;
+      } else {
         download_status = DOWNLOAD_STATUS_FAILED;
+        download_error = err;
+      }
       return DOWNLOAD_POLL_COMPLETED;
     }
     return DOWNLOAD_POLL_CONTINUE;
@@ -2698,9 +2546,9 @@ download_err_t appmngr_finish_download_app() {
   // wrote match what the catalog said to expect, so it catches truncation and
   // corruption. It is not a signature. The expected hash arrives from the same
   // catalog, over the same connection, as the binary itself, and TLS here is
-  // encryption-only (ALTCP_MBEDTLS_AUTHMODE = VERIFY_NONE, decision D-01), so
+  // encryption-only (ALTCP_MBEDTLS_AUTHMODE = VERIFY_NONE), so
   // an attacker able to substitute the download can substitute the hash with
-  // it. Real authenticity needs D-01 phase B (verified certificates) or a
+  // it. Real authenticity needs verified certificates or a
   // signed catalog.
   if (memcmp(app_info.md5, app_info.file_md5_digest, sizeof(app_info.md5)) !=
       0) {
@@ -2712,55 +2560,44 @@ download_err_t appmngr_finish_download_app() {
     download_phase = APPMNGR_PHASE_INSTALL;
   }
 
-  // We have to add this new downloaded file to the app lookup table
+  // An install no longer takes a config sector: an app gets one the first
+  // time it is launched (appmngr_assign_launch_sector()), so apps that sit on
+  // the card unlaunched do not use any of the 30. An update keeps the app's
+  // settings. A fresh install of an app that still has a sector, from an
+  // earlier install whose files went missing, starts from clean settings, as
+  // a fresh install always did.
+  if (download_update) {
+    DPRINTF("Download is an update, not deleting the config sector.\n");
+    return DOWNLOAD_OK;
+  }
   uint8_t *table = malloc(FLASH_SECTOR_SIZE);
   if (table == NULL) {
     return DOWNLOAD_CANNOTCREATE_CONFIG;
   }
   uint16_t table_length = 0;
-  // Read the table from flash memory
   appmngr_load_apps_lookup_table(table, &table_length);
-
-  // If the download is an update, don't delete the config sector
-  if (!download_update) {
-    // Update the table
-    uint16_t new_sector =
-        appmngr_find_first_empty_config_sector(table, &table_length);
-    res = appmngr_update_lookup_table(app_info.uuid, new_sector, table,
-                                      &table_length);
-
-    // Persist the table if ok
-    if (res == -1) {
-      DPRINTF("Something went wrong updating the app lookup table.\n");
-    } else {
-      res = appmngr_persist_app_lookup_table(table, table_length);
-      if (res == -1) {
-        DPRINTF("There was something wrong persisting the app lookup table.\n");
-      } else {
-        DPRINTF("App lookup table pesisted!\n");
-      }
-    }
-    free(table);
-
-    // Now delete the config sector of the app
-    res = appmngr_delete_config_sector(new_sector);
+  int sector = lookuptable_get_sector(app_info.uuid, table, &table_length);
+  free(table);
+  if (sector >= 0 && sector < appmngr_config_sector_count()) {
+    res = appmngr_delete_config_sector((uint8_t)sector);
     if (res != 0) {
       DPRINTF("Error deleting config sector: %i\n", res);
       return DOWNLOAD_CANNOTDELETECONFIGSECTOR_ERROR;
     }
-    DPRINTF("Config sector %d deleted\n", new_sector);
-    return DOWNLOAD_OK;
-  } else {
-    DPRINTF("Download is an update, not deleting the config sector.\n");
-    free(table);
-    return DOWNLOAD_OK;
+    DPRINTF("Fresh install: config sector %d of %.*s erased\n", sector, 36,
+            app_info.uuid);
   }
+  return DOWNLOAD_OK;
 }
 
 download_err_t appmngr_confirm_download_app() {
   // First, get the uuid of the app
   char uuid[64] = {0};
   snprintf(uuid, sizeof(uuid), "%s", app_info.uuid);
+  if (!uuid_is_exact4(uuid)) {
+    DPRINTF("Invalid UUID: %s\n", uuid);
+    return DOWNLOAD_PARSEJSON_ERROR;
+  }
 
   // Get the filename of the app info json
   char json_filename[256] = {0};
@@ -2830,34 +2667,6 @@ download_err_t appmngr_finish_download_firmware() {
   return DOWNLOAD_OK;
 }
 
-static void __not_in_flash_func(program_image_from_flash_src)(
-    const uint8_t *src_flash, uint32_t image_size) {
-  const uint32_t SECTOR = FLASH_SECTOR_SIZE;
-  const uint32_t PAGE = FLASH_PAGE_SIZE;
-
-  uint32_t erase_size = (image_size + (SECTOR - 1)) & ~(SECTOR - 1);
-
-  multicore_lockout_victim_init();  // keep core 1 out (safe to call here if
-                                    // linked to RAM)
-  uint32_t ints = save_and_disable_interrupts();
-
-  flash_range_erase(0, erase_size);
-
-  uint8_t pagebuf[FLASH_PAGE_SIZE];
-  uint32_t wrote = 0;
-  while (wrote < image_size) {
-    uint32_t chunk = image_size - wrote;
-    if (chunk > PAGE) chunk = PAGE;
-    memset(pagebuf, 0xFF, PAGE);
-    memcpy(pagebuf, src_flash + wrote, chunk);
-    flash_range_program(wrote, pagebuf, PAGE);
-    wrote += chunk;
-  }
-
-  flash_flush_cache();
-  restore_interrupts(ints);
-}
-
 void appmngr_cleanup_upgrade_image(void) {
   SettingsConfigEntry *folder =
       settings_find_entry(gconfig_getContext(), PARAM_APPS_FOLDER);
@@ -2890,10 +2699,12 @@ download_err_t appmngr_confirm_download_firmware() {
   snprintf(upgrade_filename, sizeof(upgrade_filename), "%s/upgrade.bin",
            settings_find_entry(gconfig_getContext(), PARAM_APPS_FOLDER)->value);
 
-  // Delete it first
+  // Delete it first. Under the lock, like every other write to the card
+  // made outside lwIP's own callbacks.
+  appmngr_fs_lock();
   f_unlink(upgrade_filename);
-
   FRESULT res = f_rename(tmp_binary_filename, upgrade_filename);
+  appmngr_fs_unlock();
   if (res != FR_OK) {
     DPRINTF("Error renaming tmp file: %i\n", res);
     return DOWNLOAD_CANNOTRENAMEFILE_ERROR;
@@ -2913,7 +2724,22 @@ void appmngr_firmwareUpgradeStart(void) {
   const uint32_t image_size =
       (uint32_t)upgrader_firmware_length * 2;  // in bytes
 
-  program_image_from_flash_src(src_flash, image_size);
+  // Stop core 1 for good: its SELECT loop runs from flash, which is out of
+  // XIP while the upgrader is written, and the device reboots right after.
+  select_coreWaitPushDisable();
+
+  // Into the slot in the launch copy's order: until the upgrader is complete,
+  // the slot boots this Booster.
+  uint8_t stub[UF2COPY_STUB_SIZE];
+  const uint8_t *booster = (const uint8_t *)&__flash_binary_start;
+  uf2copy_buildStub(stub, booster, booster + UF2COPY_BOOT2_SIZE);
+  uf2copy_io_t io = {NULL, NULL, NULL, appmngr_uf2_erase, appmngr_uf2_program};
+  if (uf2copy_writeImage(&io, (uint32_t)&_storage_flash_start - XIP_BASE,
+                         src_flash, image_size, stub,
+                         appmngr_sector_buf) != UF2COPY_OK) {
+    DPRINTF("Cannot write the upgrader\n");
+    reset_device();
+  }
 
   // UPGRADER Manager mode
   // Force to set the UPGRADER boot feature

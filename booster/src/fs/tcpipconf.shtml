@@ -13,28 +13,28 @@
             "label": "IPv4 Address",
             "type": "STRING",
             "value": "<!--#WIP-->",
-            "placeholder": "Enter a static IPv4 address"
+            "placeholder": "A static IPv4 address, such as 192.168.1.50"
         },
         {
             "name": "WIFI_NETMASK",
             "label": "Netmask",
             "type": "STRING",
             "value": "<!--#WNTMSK-->",
-            "placeholder": "Enter the netmask"
+            "placeholder": "The netmask, such as 255.255.255.0"
         },
         {
             "name": "WIFI_GATEWAY",
             "label": "Gateway",
             "type": "STRING",
             "value": "<!--#WGTWY-->",
-            "placeholder": "Enter the gateway"
+            "placeholder": "The gateway, such as 192.168.1.1"
         },
         {
             "name": "WIFI_DNS",
             "label": "DNS Servers",
             "type": "STRING",
             "value": "<!--#WDNS-->",
-            "placeholder": "Enter the DNS servers (one, or two comma-separated)"
+            "placeholder": "One or two DNS servers, such as 1.1.1.1,8.8.8.8 (optional)"
         }
     ]             
 }

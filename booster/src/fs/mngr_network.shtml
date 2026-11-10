@@ -24,7 +24,7 @@
 
   <script>
     // /.wificonf on the microSD card re-applies the WiFi network and the TCP/IP
-    // settings at every boot (EPIC-10). While it is there those two sections
+    // settings at every boot. While it is there those two sections
     // are read-only here, and the firmware refuses their saves as well. The
     // value comes from the firmware's own file check, not from anything the
     // page infers.
@@ -360,12 +360,13 @@
 
   <!-- Blue Banner Header -->
   <header class="header">
-    <h1><!--#TITLEHDR--></h1>
+    <h1><!--#TITLEH1--></h1>
   </header>
 
   <!-- Navigation Bar -->
-  <nav class="nav-bar">
-    <div class="pure-menu pure-menu-horizontal">
+  <nav class="nav-bar" x-data="{ open: false }" @click.outside="open = false" @keydown.escape.window="open = false">
+    <button type="button" class="nav-toggle" :aria-expanded="open" @click="open = !open"><i class="fas fa-bars" aria-hidden="true"></i> Menu</button>
+    <div class="pure-menu pure-menu-horizontal" :class="{ 'nav-open': open }">
       <ul class="pure-menu-list">
         <li class="pure-menu-item">
           <a href="/mngr_home.shtml" class="pure-menu-link">Apps</a>
@@ -383,6 +384,10 @@
         <li class="pure-menu-item">
           <a href="https://docs.sidecartridge.com/sidecartridge-multidevice/issues" target="_blank"
             class="pure-menu-link">Report Issue</a>
+        </li>
+        <li class="pure-menu-item">
+          <a href="https://t.me/s/sidecartridgenews" target="_blank"
+            class="pure-menu-link">News</a>
         </li>
       </ul>
     </div>

@@ -283,4 +283,5 @@ int init_romemul(IRQInterceptionCallback requestCallback,
                    true);  // Pull down (false, true)
     gpio_put(WRITE_DATA_GPIO_BASE + i, 0);
   }
+  return 0;
 }

@@ -8,6 +8,15 @@
 
 #include "mngr.h"
 
+#include "devhooks.h"  // Debug-only SWD mailbox; include in this file only
+#include "pico/rand.h"
+#include "urlparse.h"
+
+// How long the Atari gets to see the reset command before the RP reboots.
+#define MNGR_ATARI_RESET_MS 1000
+// How long a launch error stays on the Atari screen before the restart.
+#define MNGR_LAUNCH_ERROR_MS 5000
+
 static firmware_upgrade_state_t firmware_upgrade_state = FIRMWARE_UPGRADE_IDLE;
 // True while the optional upgrade.md5 companion file is being fetched, false
 // once the real image download is in flight. See mngr_firmwareUpgradeStart().
@@ -26,6 +35,17 @@ void mngr_disable_network_scan() { network_scan_enabled = false; }
 
 wifi_scan_data_t *mngr_get_networks() { return network_getFoundNetworks(); }
 
+// upgrade.bin and upgrade.md5 are replaced in place on every release, and the
+// CDN in front of them keeps the old upgrade.bin for hours. A parameter no
+// other request used gets past its cache, so the file and its checksum always
+// come from the same release.
+static const char *mngr_fresh_firmware_url(const char *url) {
+  static char fresh[URLPARSE_FRESH_URL_MAX];
+  return urlparse_addCacheBuster(url, get_rand_32(), fresh, sizeof(fresh)) == 0
+             ? fresh
+             : url;
+}
+
 static void mngr_enter_offline_mode(uint8_t wifi_status, const char *details,
                                     const char *mac_str) {
   const char *status_details =
@@ -38,6 +58,22 @@ static void mngr_enter_offline_mode(uint8_t wifi_status, const char *details,
       wifi_status, NULL, NULL, status_details,
       (mac_str != NULL && mac_str[0] != '\0') ? mac_str : NULL);
   display_refresh();
+}
+
+// Tell the Atari to reset, and keep answering its commands meanwhile. The
+// Atari reads the command between two of its own, and it sends one every
+// frame while a key is held down, then waits for the answer. Asleep here,
+// Booster would not answer, the Atari would still be waiting when the RP
+// reboots, and it would never reset. Answering a key can redraw the screen,
+// which writes its own display command, so the reset is written again.
+static void mngr_reset_atari(void) {
+  absolute_time_t until = make_timeout_time_ms(MNGR_ATARI_RESET_MS);
+  SEND_COMMAND_TO_DISPLAY(DISPLAY_COMMAND_RESET);
+  while (absolute_time_diff_us(get_absolute_time(), until) > 0) {
+    if (term_loop()) {
+      SEND_COMMAND_TO_DISPLAY(DISPLAY_COMMAND_RESET);
+    }
+  }
 }
 
 int mngr_init() {
@@ -86,7 +122,7 @@ int mngr_init() {
             appmngr_get_sdcard_info()->apps_folder_found ? "true" : "false");
   }
 
-  // Apply /.wificonf when the card carries one (EPIC-10). This runs before
+  // Apply /.wificonf when the card carries one. This runs before
   // WiFi starts, so the values take effect on this boot without a reboot,
   // and flash is written only when something changed, so a card that keeps
   // the file does not cost a flash write per boot.
@@ -357,7 +393,13 @@ int mngr_init() {
             // Start the download. NULL means use info in app_info
             err = appmngr_start_download(NULL);
             if (err != DOWNLOAD_OK) {
+              // Failed before any transfer: report it, or the page waits on
+              // "Connecting" and this state starts again on every pass.
               DPRINTF("Error downloading app. Drive to error page.\n");
+              appmngr_download_error(err);
+              appmngr_set_download_phase(APPMNGR_PHASE_FAILED);
+              appmngr_confirm_failed_download_app();
+              appmngr_download_status(DOWNLOAD_STATUS_FAILED);
             }
           }
           break;
@@ -391,6 +433,18 @@ int mngr_init() {
           appmngr_download_status(DOWNLOAD_STATUS_IDLE);
           break;
         }
+        case DOWNLOAD_STATUS_FAILED: {
+          // The HTTP callbacks mark a refused or dropped transfer FAILED
+          // themselves, past the STARTED case above: the page follows the
+          // phase, so move it on once, or it shows "Connecting" forever.
+          if (appmngr_get_download_phase() != APPMNGR_PHASE_FAILED &&
+              appmngr_get_download_phase() != APPMNGR_PHASE_IDLE) {
+            DPRINTF("Download failed: %d\n", appmngr_get_download_error());
+            appmngr_set_download_phase(APPMNGR_PHASE_FAILED);
+            appmngr_confirm_failed_download_app();
+          }
+          break;
+        }
       }
     }
 
@@ -406,10 +460,18 @@ int mngr_init() {
         case DOWNLOAD_STATUS_NOT_STARTED: {
           if ((absolute_time_diff_us(get_absolute_time(), start_download_time) <
                0)) {
-            err = appmngr_start_download(
-                fw_fetching_md5 ? FIRMWARE_MD5_URL : FIRMWARE_BINARY_URL);
+            err = appmngr_start_download(mngr_fresh_firmware_url(
+                fw_fetching_md5 ? FIRMWARE_MD5_URL : FIRMWARE_BINARY_URL));
             if (err != DOWNLOAD_OK) {
               DPRINTF("Error downloading firmware. Drive to error page.\n");
+              // As for a transfer that fails: the Upgrade page follows the
+              // phase. A failed upgrade.md5 start is turned into its own
+              // error by the FAILED case below.
+              appmngr_download_firmware_error(err);
+              appmngr_set_download_phase(APPMNGR_PHASE_FAILED);
+              appmngr_confirm_failed_download_firmware();
+              appmngr_download_firmware_status(DOWNLOAD_STATUS_FAILED);
+              firmware_upgrade_state = FIRMWARE_UPGRADE_FAILED;
             }
           }
           break;
@@ -425,6 +487,14 @@ int mngr_init() {
             appmngr_set_progress_reporting(true);
             appmngr_download_firmware_error(DOWNLOAD_MD5UNAVAILABLE_ERROR);
             appmngr_set_download_phase(APPMNGR_PHASE_FAILED);
+            firmware_upgrade_state = FIRMWARE_UPGRADE_FAILED;
+          } else if (firmware_upgrade_state != FIRMWARE_UPGRADE_FAILED) {
+            // The image itself, marked FAILED by the HTTP callbacks: as for
+            // an app, the Upgrade page needs the phase.
+            DPRINTF("Firmware download failed: %d\n",
+                    appmngr_get_download_firmware_error());
+            appmngr_set_download_phase(APPMNGR_PHASE_FAILED);
+            appmngr_confirm_failed_download_firmware();
             firmware_upgrade_state = FIRMWARE_UPGRADE_FAILED;
           }
           break;
@@ -526,6 +596,28 @@ int mngr_init() {
         if (err == DOWNLOAD_LAUNCHAPP_OK) {
           device_reset = true;
           reboot_time = make_timeout_time_ms(0);
+        } else if (err == DOWNLOAD_LAUNCHAPP_FILE_ERROR ||
+                   err == DOWNLOAD_LAUNCHAPP_COPY_ERROR) {
+          // The launch had already stopped the network, so Booster cannot
+          // carry on: show why, then restart into Booster, which the slot
+          // boots after a failed copy. The boot target was not changed.
+          appmngr_set_launch_status(err);
+          display_mngr_change_status(7, err == DOWNLOAD_LAUNCHAPP_FILE_ERROR
+                                            ? "Launch failed: app file missing"
+                                            : "Launch failed: copy error");
+          display_refresh();
+          sleep_ms(MNGR_LAUNCH_ERROR_MS);
+          mngr_reset_atari();
+          reset_device();
+        } else {
+          // Leave the in-progress state, or the loop retries the launch on
+          // every pass. The status keeps the error for whoever asks.
+          appmngr_set_launch_status(err);
+          display_mngr_change_status(
+              7, err == DOWNLOAD_LAUNCHAPP_NOCONFIGSECTOR_ERROR
+                     ? "Cannot launch: no settings slot"
+                     : "Cannot launch the app");
+          display_refresh();
         }
       }
     } else if (appmngr_get_launch_status() == DOWNLOAD_LAUNCHAPP_SCHEDULED) {
@@ -541,9 +633,7 @@ int mngr_init() {
       if (absolute_time_diff_us(get_absolute_time(), reboot_time) < 0) {
         DPRINTF("Rebooting\n");
         device_reset = false;
-        // Send the reboot command
-        SEND_COMMAND_TO_DISPLAY(DISPLAY_COMMAND_RESET);
-        sleep_ms(1000);
+        mngr_reset_atari();
         reset_device();
       }
     }
@@ -568,9 +658,7 @@ int mngr_init() {
             sleep_ms(30000);
           }
         } else {
-          // Send the reboot command
-          SEND_COMMAND_TO_DISPLAY(DISPLAY_COMMAND_RESET);
-          sleep_ms(1000);
+          mngr_reset_atari();
           reset_deviceAndEraseFlash();
         }
       }
@@ -578,6 +666,7 @@ int mngr_init() {
 
     // Check remote commands
     term_loop();
+    devhooks_poll();
   }
 }
 

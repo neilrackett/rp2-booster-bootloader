@@ -98,7 +98,7 @@ int main() {
     DPRINTF("Global configuration initialized\n");
   }
 
-  // Migrate a canonical apps-catalog URL onto the md-store host (D-06). Runs
+  // Migrate a canonical apps-catalog URL onto the md-store host. Runs
   // before ROM emulation starts, so the one-time flash write cannot disturb the
   // cartridge port, and before anything can serve the APPSURL SSI tag. A no-op
   // (and no flash write) for custom URLs and already-migrated devices.

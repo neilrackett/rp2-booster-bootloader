@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <title><!--#TITLEHDR--></title>
+
+  <link rel="icon" href="data:;base64,=">
+  <meta charset="UTF-8">
+  <!-- Important for mobile: ensures responsive scaling -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <!-- Pure.css (CDN) -->
+  <link
+    rel="stylesheet"
+    href="https://cdn.jsdelivr.net/npm/purecss@3.0.0/build/pure-min.css"
+    integrity="sha384-X38yfunGUhNzHpBaEBsWLO+A0HDYOQi8ufWDkZ0k9e0eXz/tH3II7uKZ9msv++Ls"
+    crossorigin="anonymous"
+  />
+  <link rel="stylesheet" href="styles.css?v=1.0" />
+</head>
+
+<body>
+  <!-- A request the Manager refused. The handler stores the reason, shown
+       here; error.shtml reads it from its own URL instead, which only works
+       when the browser goes there itself, not as a handler's answer. -->
+  <header class="header">
+    <h1><!--#TITLEH1--></h1>
+  </header>
+
+  <div class="spinner">
+    <span><!--#RSPMSG--></span>
+  </div>
+
+  <div class="spinner">
+    <button class="pure-button" onclick="window.location.href='/mngr_home.shtml'">
+      Go back to main page
+    </button>
+  </div>
+</body>
+</html>

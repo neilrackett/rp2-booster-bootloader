@@ -3,7 +3,7 @@
 ![Discord](https://img.shields.io/discord/1160868666162823218?style=flat&label=Discord&link=https%3A%2F%2Fdiscord.com%2Finvite%2Fu73QP9MEYC)
 
 
-This is an advanced second-stage bootloader for the Raspberry Pi Pico W and the SidecarTridge Multidevice board. The current 2.4.x series targets the RP2040-based Pico W and focuses on a web-based Manager, Atari ST terminal integration, OTA updates, and resilient offline-safe boot flows.  
+This is an advanced second-stage bootloader for the Raspberry Pi Pico W and the SidecarTridge Multidevice board. The current 2.5.x series targets the RP2040-based Pico W and focuses on a web-based Manager, Atari ST terminal integration, OTA updates, and resilient offline-safe boot flows.  
 
 ## Key Features  
 
@@ -17,7 +17,7 @@ This is an advanced second-stage bootloader for the Raspberry Pi Pico W and the 
   Store and manage files on a micro SD card, allowing apps to use external storage or turn the device into a file server.  
 
 - **Catalog Filters in the Apps View**  
-  Narrow the app catalog with Release type, Platform, Features and Creator filters so it is easier to find the right microfirmware.  
+  Browse apps as cartridges on shelves by topic, or find one by search, computer, release type, creator or tag. Colours show at a glance which apps are installed and which have an update.  
 
 - **Catalog Channel Selector**  
   Choose the catalog on the Config page: **Stable** for tested releases (the default), **Testing** for unstable releases, **Development** for microfirmware developers, or a custom catalog URL.  
@@ -154,6 +154,7 @@ Install the required dependencies:
 - CMake
 - Python 3
 - GCC ARM embedded toolchain (`arm-none-eabi-*`)
+- Perl, which the Booster build uses to pack the web pages into the firmware. The build stops if it is missing
 - `stcmd` tooling for the embedded Atari ST terminal firmware
 
 The root `version.txt` file defines the release string and is copied into the subprojects by the build scripts.
@@ -344,6 +345,8 @@ In **Manager mode**, the Booster app tries to connect to your configured WiFi ne
 
 If your network supports `.local` name resolution, you can access the web interface using `http://sidecart.local`. Otherwise, use the IP address shown on the Atari ST screen: the one assigned by your DHCP server, or the static address set on the [Network view](#network-view) or in a [`.wificonf` file](#configuring-wifi-from-a-file).
 
+The menu at the top of the web interface opens the [Apps](#apps-view), [Network](#network-view) and [Config](#config-view) views. On a phone it is folded behind a **Menu** button and opens over the page. Its last three items open in a new tab: **Help** goes to the online documentation, **Report Issue** to the page for reporting a problem, and **News** to the [SidecarTridge news channel on Telegram](https://t.me/s/sidecartridgenews). The [Upgrade view](#upgrade-view) is not in the menu: it opens from the banner shown when a new firmware version is available.
+
 If WiFi retries are exhausted, Booster falls back to an **offline Manager mode**. In that state network features are disabled, but the Atari ST terminal remains available so you can still boot already-downloaded microfirmwares manually.
 
 The Atari ST Manager screen and the shared system information area in the web UI show the current MAC address and WiFi signal strength. When connected, Booster also answers ICMP ping requests to simplify network diagnostics.
@@ -358,20 +361,27 @@ The **Apps view** shows:
 - The list of installed apps on the device.
 - The list of apps that are not installed but are available on the microSD card.
 
-This view is the default view when you access the web interface. It lists the catalog selected on the [Config view](#config-view). At the top of the page, the **Release type** chips (**All**, **Stable**, **Beta**) filter the list already loaded, without changing the catalog, and the **Platform**, **Features** and **Creator** chips narrow it further. While the catalog is being fetched, a loading indicator is shown.
+This view is the default view when you access the web interface. It lists the catalog selected on the [Config view](#config-view). Apps are shown as cartridges on shelves, one shelf per topic. Apps with an update come first, then the other installed apps. Swipe a shelf or use its arrows to see more.
+
+To find an app, type in the search box: it looks in the names, descriptions, tags and creators. The dropdowns narrow the list by computer, release type and creator, and the chips pick one of the tags shared by several apps. While a filter is on, the shelves become a single list of the matching apps, and **Clear filters** brings the shelves back.
 
 ![Booster Manager Apps View 1](/docs/BOOSTER-MANAGER-APPS-1.png)
 
-Each app shows the following information:
+The colour of a cartridge shows the state of the app:
+- **Grey**: not installed.
+- **Putty, the colour of the Atari ST**: installed.
+- **Reddish, with an exclamation mark**: installed, and a newer version is available.
+
+Each cartridge has one main button: **Install**, or **Launch** if the app is installed. Select the cartridge, or its **i** or exclamation mark button, to open the app's panel, which shows:
 - **Name**: The name of the app.
 - **Version**: The version of the app.
 - **Description**: A short description of the app.
 - **Features**: A list of features supported by the app as a taxonomy.
 - **Computer**: The computers supported by the app as a taxonomy.
 
-If the catalog publishes more than one version of an app, a **Version** dropdown appears under the app name. The latest version is selected by default; older versions, when available, are listed in semantic-version order. The currently installed version is tagged "(current)" when it is not the latest.
+If the catalog publishes more than one version of an app, a **Version** dropdown appears in the panel. The latest version is selected by default; older versions, when available, are listed in semantic-version order. The currently installed version is tagged "(current)" when it is not the latest.
 
-At the right hand side of each app, you can see the following buttons:
+The panel has the following buttons:
 - **Install vX / Update to vX / Downgrade to vX**: A single context-aware action button that installs the version selected in the dropdown. Its label and color reflect what the action will do relative to what is already installed. The button is hidden when the selected version is the one already installed. Downgrading to an older version requires an extra confirmation.
 - **Delete**: Delete the app from the device microSD card. You can download the app again if you want to.
 
@@ -380,7 +390,7 @@ At the right hand side of each app, you can see the following buttons:
 - **Launch**: Launch the app. This will install the app in the flash memory of the device and after reboot it will be launched automatically. If you want to launch an app that is already installed, you can use the **Launch** button at any time.
 - **Restore and launch** and **Restore config only**: Shown only on the DEV APP card. See [DEV APP: tools for microfirmware developers](#dev-app-tools-for-microfirmware-developers).
 
-On Atari ST systems, Manager mode also supports terminal-driven manual boot: press `ESC` to enter the apps workflow, or press any `SHIFT` key to continue booting from GEMDOS.
+On Atari ST systems, Manager mode also supports terminal-driven manual boot: press `ESC` to enter the apps workflow, or press any `SHIFT` key to continue booting from GEMDOS. The apps workflow lists the downloaded apps 18 to a page: press `N` and `P` for the next and previous page, and type an app's number to launch it from any page.
 
 ![Booster Manager Apps View 3](/docs/BOOSTER-MANAGER-APPS-3.png)
 
@@ -389,6 +399,12 @@ When launching an app, the computer screen will show a message indicating that t
 The Booster microfirmware app is now installed in the flash memory of the device, and every time you power on the device, it will automatically launch the app. 
 
 To return to the Booster app, the user needs to use the command menu on the microfirmware app to do it, or press the SELECT button for more than 10 seconds and then power off and power on the device and the computer.
+
+#### Settings of each app
+
+Each app keeps its settings in one of 30 slots in the device's flash memory. An app gets a slot the first time it is launched, not when it is installed, so apps you install but never run do not use one. When all 30 slots are in use, launching another app moves the settings of the app you launched least recently to the microSD card, as `<uuid>.cfg` in the apps folder, and that app gets them back the next time you launch it. So you can install and use any number of apps, and each keeps its settings.
+
+On the Apps page, an app whose settings are on the card says so under its name. The `.cfg` files travel with the card: another device that launches the app restores those settings. The apps folder also holds `.lookup`, a copy of the device's list of slots, which the device uses to repair that list if the power is cut while it is being saved; a copy made by another device is ignored. Deleting an app removes its `.cfg` too, as do **Restore config only** and **Restore and launch** on the DEV APP card. While the **Development** catalog is selected, the DEV APP keeps its slot and its settings are never moved to the card.
 
 #### DEV APP: tools for microfirmware developers
 
@@ -413,7 +429,7 @@ The **Network view** shows the list of available WiFi networks and permits some 
 - **Hostname**: The hostname of the device. This is used to identify the device on the network. By default is `sidecart`. 
 - **Wifi Power**: The power of the WiFi module. From 0 to 4. 
 - **Show RSSI**: Show the RSSI of the WiFi module. This is used to show the signal strength of the WiFi network.
-- **DHCP Enabled**: Enable or disable DHCP for the device. If disabled, the TCP/IP settings view lets you enter a static IPv4 address, netmask, gateway, and DNS servers.
+- **DHCP Enabled**: Enable or disable DHCP for the device. If disabled, the TCP/IP settings view lets you enter a static IPv4 address, netmask, gateway, and DNS servers (one, or two separated by a comma; optional). They are checked when you click **Save**: if one is not valid, the page names it and nothing is saved.
 
 The system information banner also shows the Pico W MAC address, which is useful when configuring router allow-lists or debugging network issues.
 
@@ -446,6 +462,26 @@ It also provides two buttons to reboot the device:
 
 - **Reboot the device**: Reboot the device and load the microfirmware app in flash memory. This is the normal way to reboot the device.
 - **Restore to the default fabric settings**: Reboot the device and load the Booster app in **Factory mode**. This is useful to reset the WiFi configuration or return the device to its default setup.
+
+### Upgrade view
+
+The **Upgrade view** installs a new version of the Booster firmware over WiFi. It has no entry in the menu. When Booster starts in Manager mode it checks the latest published version, and if it is newer than the one running, a **Firmware update available** banner appears at the top of the Apps, Network and Config views. The banner shows the new version, a link to the CHANGELOG and an **Upgrade** button that opens this view.
+
+The upgrade has two steps. Keep the page open and do not refresh it until it finishes.
+
+1. **Download.** Click **Continue upgrading**. The device downloads the checksum of the new firmware (`upgrade.md5`) and then the firmware itself (`upgrade.bin`) to the apps folder on the microSD card. A progress bar shows how much has arrived. When the download completes, the device checks the firmware against the checksum. This can take up to two minutes, depending on your network.
+2. **Install.** Click **Confirm firmware upgrade**. The device restarts into the installer, which checks the whole file on the microSD card, writes the new firmware to flash, reads it back, and starts it. This takes about a minute. After 60 seconds the page reloads the web interface.
+
+Do not power off the device while it installs. If the power is cut anyway, or the card cannot be read, power the device on again with the same card in: the installer starts over. A file that cannot be read in full is refused before anything is written, and the current firmware keeps running.
+
+The upgrade is refused, and nothing is written to flash, if the checksum file cannot be downloaded or read, or if the downloaded firmware does not match it. The page shows the reason, for example *Checksum mismatch: the download is corrupt or incomplete*, and a **Back to Home** button. The current firmware keeps running, so you can try again later.
+
+After the upgrade:
+
+- The device starts in Manager mode with the new firmware.
+- The WiFi and network settings, the Config view settings and the settings saved by each microfirmware are kept.
+- The microfirmware that was in the device is replaced by the placeholder that ships with the firmware. The app is still on the microSD card: launch it again from the [Apps view](#apps-view).
+- The downloaded `upgrade.bin` is deleted from the microSD card.
 
 
 ## License

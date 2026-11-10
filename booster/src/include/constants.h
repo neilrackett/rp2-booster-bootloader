@@ -18,7 +18,7 @@
 // CN=sidecartridge.com, Google Trust Services), verified 2026-07-29. This
 // covers both VERSION_URL and FIRMWARE_BINARY_URL, so the firmware OTA now
 // downloads over TLS as well. Note the TLS is encrypted but NOT authenticated
-// (VERIFY_NONE, decision D-01) -- the MD5 check in appmngr remains the
+// (VERIFY_NONE) -- the MD5 check in appmngr remains the
 // integrity check that actually gates flashing.
 #ifndef SIDECART_BASE_URL
 #define SIDECART_BASE_URL "https://atarist.sidecartridge.com"

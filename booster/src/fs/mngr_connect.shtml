@@ -32,7 +32,7 @@
         ssid: '',
         auth: '',
         authstring: '',
-        // /.wificonf re-applies the WiFi network at every boot (EPIC-10), so
+        // /.wificonf re-applies the WiFi network at every boot, so
         // connecting from here is refused while it is on the card.
         locked: '<!--#WIFICONF-->' === 'Yes',
 
@@ -126,14 +126,15 @@
 
   <!-- Blue Banner Header -->
   <header class="header">
-    <h1><!--#TITLEHDR--></h1>
+    <h1><!--#TITLEH1--></h1>
     <!-- Manually stop the network scan to avoid overload the WiFi chip -->
     <!--#WLSTSTP-->
   </header>
 
   <!-- Navigation Bar -->
-  <nav class="nav-bar">
-    <div class="pure-menu pure-menu-horizontal">
+  <nav class="nav-bar" x-data="{ open: false }" @click.outside="open = false" @keydown.escape.window="open = false">
+    <button type="button" class="nav-toggle" :aria-expanded="open" @click="open = !open"><i class="fas fa-bars" aria-hidden="true"></i> Menu</button>
+    <div class="pure-menu pure-menu-horizontal" :class="{ 'nav-open': open }">
       <ul class="pure-menu-list">
         <li class="pure-menu-item">
           <a href="/mngr_home.shtml" class="pure-menu-link">Apps</a>
@@ -151,6 +152,10 @@
         <li class="pure-menu-item">
           <a href="https://docs.sidecartridge.com/sidecartridge-multidevice/issues" target="_blank"
             class="pure-menu-link">Report Issue</a>
+        </li>
+        <li class="pure-menu-item">
+          <a href="https://t.me/s/sidecartridgenews" target="_blank"
+            class="pure-menu-link">News</a>
         </li>
       </ul>
     </div>

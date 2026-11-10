@@ -11,14 +11,13 @@
 #include "gconfig.h"
 #include "hardware/flash.h"
 #include "hardware/sync.h"
+#include "hw_config.h"
 #include "sd_card.h"
+#include "uf2copy.h"
 
-#define UF2_BLOCK_SIZE 512
 #define UPGRADE_FILENAME "upgrade.bin"
 
-enum { BUFFER_SIZE = FLASH_BLOCK_SIZE };
-
-static uint8_t flash_write_buffer[BUFFER_SIZE] = {0};
+static uint8_t sector_buf[UF2COPY_SECTOR_SIZE];
 
 static size_t bounded_copy(char *dst, size_t dst_len, const char *src) {
   size_t i = 0;
@@ -85,201 +84,126 @@ static inline void jump_to_booster_app() {
   DPRINTF("You should never reach this point\n");
 }
 
-/*
-  Reads a UF2 file from the microSD card, ignores each block’s targetAddr,
-  and writes each block’s payload linearly into flash starting at flashAddress.
-  Before writing, it erases [flashAddress..(flashAddress + flashSize)).
-
-  We no longer write one UF2 block at a time. Instead, we accumulate multiple
-  payloads from consecutive UF2 blocks into a fixed RAM buffer of size
-  'userPageSize' until that buffer is full or we run out of data.
-  Then we flush that buffer to the flash.
-
-  If the leftover region in flash is smaller than the userPageSize,
-  we do partial writes, ensuring we never write beyond the allocated region.
-
-  Parameters:
-    - filename: Path to the UF2 file on SD card.
-    - flashAddress: Start address in RP2040 flash memory.
-    - flashSize: Size of the region to erase/write (must be a multiple of 4096).
-    - userPageSize: The chunk size for flash writes (must be a multiple of 256).
-
-  Returns FRESULT error codes (FR_OK if successful, etc.).
-
-  Steps:
-    1) Verify userPageSize is multiple of 256.
-    2) Open UF2 file.
-    3) Erase [flashAddress..flashAddress+flashSize).
-    4) Repeatedly read 512-byte UF2 blocks from file, parse out the payload,
-       and accumulate that payload in the shared RAM buffer up to userPageSize.
-    5) Once the buffer is full (or no more data), write it to flash.
-    6) If flash region remains but we have partial leftover data < userPageSize,
-       do a final partial write.
-
-  NOTE:
-    - We do partial writes if leftover flash size is smaller than userPageSize.
-    - The shared RAM buffer must be at least userPageSize bytes.
-*/
-
-static inline FRESULT __not_in_flash_func(storeUF2FileToFlash)(
-    const char *filename, uint32_t flashAddress, uint32_t flashSize,
-    uint32_t userPageSize) {
+// FatFs and flash access for the uf2copy functions. This upgrader runs from
+// RAM, so flash can be read between two erases or programs.
+typedef struct {
   FIL file;
-  FRESULT res;
-  UINT bytesRead;
+  const char *path;
+} upgrade_file_t;
 
-  // Check page size
-  if (userPageSize == 0 || (userPageSize % FLASH_PAGE_SIZE) != 0 ||
-      (userPageSize > sizeof(flash_write_buffer))) {
-    DPRINTF("Error: userPageSize (%u) is not a multiple of %u.\n", userPageSize,
-            FLASH_PAGE_SIZE);
-    return FR_INVALID_PARAMETER;
+static int upgrade_read(void *ctx, uint8_t *buf, uint32_t len, uint32_t *got) {
+  UINT n = 0;
+  if (f_read(&((upgrade_file_t *)ctx)->file, buf, len, &n) != FR_OK) {
+    return 1;
+  }
+  *got = n;
+  return 0;
+}
+
+// FatFs is built without f_lseek() to keep the upgrader small: start over by
+// opening the file again.
+static int upgrade_rewind(void *ctx) {
+  upgrade_file_t *f = (upgrade_file_t *)ctx;
+  f_close(&f->file);
+  return f_open(&f->file, f->path, FA_READ) == FR_OK ? 0 : 1;
+}
+
+static void upgrade_erase(void *ctx, uint32_t offset, uint32_t len) {
+  (void)ctx;
+  uint32_t ints = save_and_disable_interrupts();
+  flash_range_erase(offset, len);
+  restore_interrupts(ints);
+}
+
+static void upgrade_program(void *ctx, uint32_t offset, const uint8_t *data,
+                            uint32_t len) {
+  (void)ctx;
+  uint32_t ints = save_and_disable_interrupts();
+  flash_range_program(offset, data, len);
+  restore_interrupts(ints);
+}
+
+// Booster's region is gone or unverified: stop here. The slot, where this
+// upgrader lives, is untouched and the boot target is still the upgrader, so
+// the next power-on runs it again and retries the copy from the card.
+static void upgrade_failed(const char *why) {
+  DPRINTF("Upgrade failed: %s. Power-cycle to try again.\n", why);
+  while (true) {
+    __wfi();
+  }
+}
+
+// Writes upgrade.bin, the full image laid out from the start of flash: the
+// placeholder's slot, then Booster. Booster's region goes first and is read
+// back, while the slot still holds this upgrader; the slot goes last, in the
+// launch copy's order, with the new Booster as its stub.
+static void upgrade(const char *path) {
+  const uint32_t booster = (uint32_t)&_booster_app_flash_start - XIP_BASE;
+  const uint32_t end = (uint32_t)&_config_flash_start - XIP_BASE;
+
+  static upgrade_file_t file;
+  file.path = path;
+  FRESULT fres = f_open(&file.file, path, FA_READ);
+  if (fres != FR_OK) {
+    DPRINTF("Cannot open %s: %d\n", path, fres);
+    return;
+  }
+  uf2copy_io_t io = {&file, upgrade_read, upgrade_rewind, upgrade_erase,
+                     upgrade_program};
+
+  // The whole file once, before anything is erased: a card that cannot read
+  // it, or a file that is not a full image, leaves Booster as it is.
+  uint32_t total = 0;
+  uf2copy_result_t measured = uf2copy_measure(&io, &total);
+  // Images built before v2.5.0 carry one byte past the end, at the first
+  // config sector's address; the region is all that is written.
+  if (total > end) {
+    total = end;
+  }
+  if (measured != UF2COPY_OK || total <= booster) {
+    DPRINTF("Not a full image (%lu payload bytes), or unreadable\n",
+            (unsigned long)total);
+    f_close(&file.file);
+    return;
   }
 
-  // Open file
-  res = f_open(&file, filename, FA_READ);
-  if (res != FR_OK) {
-    DPRINTF("Error opening file %s: %d\n", filename, res);
-    return res;
+  DPRINTF("Writing Booster: %lu bytes\n", (unsigned long)(total - booster));
+  upgrade_erase(NULL, booster, end - booster);
+  uint32_t written = 0;
+  if (uf2copy_writeRange(&io, booster, booster, end - booster, sector_buf,
+                         &written) != UF2COPY_OK) {
+    upgrade_failed("cannot read the image");
+  }
+  if (uf2copy_verifyRange(&io, booster, (const uint8_t *)XIP_BASE + booster,
+                          total - booster, sector_buf) != UF2COPY_OK) {
+    upgrade_failed("Booster differs from the image");
   }
 
-  // Erase region
-  uint32_t offset = flashAddress - XIP_BASE;
-  if (flashSize == 0) {
-    // If user passed 0, nothing to do?
-    f_close(&file);
-    return FR_INVALID_PARAMETER;
-  }
-
-  DPRINTF("Erasing %u bytes of flash at offset 0x%X\n", flashSize, offset);
-  {
-    uint32_t ints = save_and_disable_interrupts();
-    flash_range_erase(offset, flashSize);
-    restore_interrupts(ints);
-  }
-
-  DPRINTF("Erased %u bytes of flash at offset 0x%X\n", (unsigned int)flashSize,
-          offset);
-
-  // We'll keep track of how many bytes we have in accumBuf.
-  uint32_t accumUsed = 0;
-
-  // We'll read the file block by block (512 bytes each) and parse payload.
-  uint32_t currentOffset = offset;
-  bool done = false;
-
-  while (!done) {
-    // Attempt to read 512 bytes for a UF2 block.
-    uint8_t uf2block[UF2_BLOCK_SIZE];
-    res = f_read(&file, uf2block, sizeof(uf2block), &bytesRead);
-
-    if (res != FR_OK) {
-      DPRINTF("Error reading file: %d\n", res);
-      break;  // error
-    }
-    if (bytesRead == 0) {
-      // End of file.
-      done = true;
-    } else if (bytesRead < UF2_BLOCK_SIZE) {
-      DPRINTF("Warning: incomplete UF2 block (%u bytes). Ignored.\n",
-              bytesRead);
-      done = true;
-    } else {
-      // parse the block
-      const uint32_t UF2_MAGIC_START0 = 0x0A324655;
-      const uint32_t UF2_MAGIC_START1 = 0x9E5D5157;
-      uint32_t magic0 = ((uint32_t *)uf2block)[0];
-      uint32_t magic1 = ((uint32_t *)uf2block)[1];
-
-      if (magic0 != UF2_MAGIC_START0 || magic1 != UF2_MAGIC_START1) {
-        DPRINTF("Invalid UF2 magic. Skipping block.\n");
-        continue;  // skip
-      }
-
-      uint32_t payloadSize = ((uint32_t *)uf2block)[4];
-      if (payloadSize == 0 || payloadSize > 476) {
-        DPRINTF("Invalid UF2 payload size: %u. Skipping.\n", payloadSize);
-        continue;
-      }
-
-      // The payload is located at offset 32 in the block.
-      uint8_t *payload = uf2block + 32;
-
-      // Now we have 'payloadSize' bytes to accumulate in accumBuf.
-      // We might have to break it up if there's not enough space left.
-      uint32_t payloadPos = 0;
-
-      while (payloadPos < payloadSize) {
-        uint32_t leftover = payloadSize - payloadPos;
-        uint32_t spaceInBuf = userPageSize - accumUsed;
-        uint32_t toCopy = (leftover < spaceInBuf) ? leftover : spaceInBuf;
-
-        // Copy to the accumulation buffer.
-        memcpy(flash_write_buffer + accumUsed, payload + payloadPos, toCopy);
-        accumUsed += toCopy;
-        payloadPos += toCopy;
-
-        // If accumBuf is full, flush it to flash.
-        if (accumUsed == userPageSize) {
-          // Check leftover region.
-          uint32_t leftoverRegion = (offset + flashSize) - currentOffset;
-          if (leftoverRegion == 0) {
-            // No more space in flash.
-            done = true;
-            break;
-          }
-
-          // We'll write either userPageSize or leftoverRegion if smaller.
-          uint32_t chunk =
-              (userPageSize <= leftoverRegion) ? userPageSize : leftoverRegion;
-
-          // Program the flash with 'chunk' bytes.
-          {
-            uint32_t ints = save_and_disable_interrupts();
-            flash_range_program(currentOffset, flash_write_buffer, chunk);
-            restore_interrupts(ints);
-          }
-
-          currentOffset += chunk;
-          accumUsed = 0;  // reset for next round
-
-          // If leftoverRegion < userPageSize, we wrote partially.
-          if (chunk < userPageSize) {
-            done = true;
-            break;
-          }
-        }
-
-        if (done) break;
-      }
-    }
-
-    if (done) {
-      // either end of file or no more flash space
-      break;
+  // The new Booster is in place. The slot: its first sector boots that
+  // Booster while the rest is written, and is written last.
+  DPRINTF("Writing the slot\n");
+  uint8_t stub[UF2COPY_STUB_SIZE];
+  const uint8_t *newBooster = (const uint8_t *)XIP_BASE + booster;
+  uf2copy_buildStub(stub, newBooster, newBooster + UF2COPY_BOOT2_SIZE);
+  upgrade_erase(NULL, 0, UF2COPY_SECTOR_SIZE);
+  upgrade_program(NULL, 0, stub, UF2COPY_STUB_SIZE);
+  upgrade_erase(NULL, UF2COPY_SECTOR_SIZE, booster - UF2COPY_SECTOR_SIZE);
+  if (uf2copy_writeRange(&io, UF2COPY_SECTOR_SIZE, UF2COPY_SECTOR_SIZE,
+                         booster - UF2COPY_SECTOR_SIZE, sector_buf,
+                         &written) == UF2COPY_OK) {
+    uint32_t got = 0;
+    if (uf2copy_readRange(&io, 0, UF2COPY_SECTOR_SIZE, sector_buf, &got) ==
+            UF2COPY_OK &&
+        got > 0) {
+      upgrade_erase(NULL, 0, UF2COPY_SECTOR_SIZE);
+      uint32_t len = (got + UF2COPY_PAGE_SIZE - 1) & ~(UF2COPY_PAGE_SIZE - 1);
+      memset(sector_buf + got, 0xFF, len - got);
+      upgrade_program(NULL, 0, sector_buf, len);
     }
   }
-
-  // If we have leftover data in accumBuf, flush it partially.
-  if (accumUsed > 0 && !res) {
-    // leftover region check
-    uint32_t leftoverRegion = (offset + flashSize) - currentOffset;
-    if (leftoverRegion > 0) {
-      uint32_t chunk =
-          (accumUsed <= leftoverRegion) ? accumUsed : leftoverRegion;
-      // Program partial.
-      {
-        uint32_t ints = save_and_disable_interrupts();
-        flash_range_program(currentOffset, flash_write_buffer, chunk);
-        restore_interrupts(ints);
-      }
-      currentOffset += chunk;
-    }
-  }
-
-  f_close(&file);
-
-  return FR_OK;
+  // A failure in the slot leaves the stub, which boots the new Booster.
+  f_close(&file.file);
+  DPRINTF("Upgrade written\n");
 }
 
 int main() {
@@ -345,6 +269,13 @@ int main() {
     jump_to_booster_app();
   }
 
+  // The SD card speed set in Booster, lowered there for a card that needs it.
+  unsigned int baudKb = gconfig_get_sd_baud_rate_kb();
+  if (baudKb > 0 && sd_get_num() > 0) {
+    DPRINTF("SD card baud rate: %u kbit/s\n", baudKb);
+    sd_get_by_num(0)->spi_if_p->spi->baud_rate = baudKb * 1000U;
+  }
+
   // We must initialize the FatFS file system
   FATFS fs;
   FRESULT res = f_mount(&fs, "", 1);
@@ -356,10 +287,7 @@ int main() {
   // Now the upgrade.bin file is the firmware binary, it must be copied to
   // the start of the flash
   DPRINTF("Writing firmware binary to flash: %s\n", tmp_binary_filename);
-  res = storeUF2FileToFlash(
-      tmp_binary_filename, (uint32_t)&__flash_binary_start,
-      (unsigned int)&_config_flash_start - (uint32_t)&__flash_binary_start,
-      FLASH_BLOCK_SIZE);
+  upgrade(tmp_binary_filename);
 
   DPRINTF("Launching firmware binary\n");
   jump_to_booster_app();

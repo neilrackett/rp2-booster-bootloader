@@ -19,9 +19,13 @@
 #define TERM_MENU_INSTRUCTIONS "Type app number and press Enter\n"
 #define TERM_MENU_RETURN_OPTION "0. Return to connection menu\n"
 #define TERM_MENU_PROMPT "App #: "
+// Apps listed per page: the 25-row screen also holds the three header lines,
+// the page line, the prompt and one status line.
+#define TERM_APPS_PER_PAGE 18
 
 static TransmissionProtocol last_protocol;
-static bool last_protocol_valid = false;
+// Set by the DMA interrupt when a command arrives, cleared by term_loop().
+static volatile bool last_protocol_valid = false;
 static bool term_active = false;
 
 static uint32_t memory_shared_address = 0;
@@ -30,6 +34,12 @@ static uint32_t memory_random_token_seed_address = 0;
 static appmngr_installed_app_t installed_apps[APPMNGR_MAX_INSTALLED_APPS];
 static uint16_t installed_app_count = 0;
 static bool installed_apps_ready = false;
+static uint16_t term_page = 0;
+
+static uint16_t term_page_count(void) {
+  return (uint16_t)((installed_app_count + TERM_APPS_PER_PAGE - 1) /
+                    TERM_APPS_PER_PAGE);
+}
 
 static char screen[TERM_SCREEN_SIZE];
 static uint8_t cursor_x = 0;
@@ -60,6 +70,32 @@ static void __not_in_flash_func(handle_protocol_checksum_error)(
   DPRINTF("Checksum error detected (ID=%u, Size=%u)\n", protocol->command_id,
           protocol->payload_size);
 }
+
+#if defined(_DEBUG) && (_DEBUG != 0)
+bool term_injectProtocol(uint16_t commandId, const uint16_t *payload,
+                         uint16_t payloadSize) {
+  if (last_protocol_valid || payloadSize > sizeof(last_protocol.payload)) {
+    return false;
+  }
+  last_protocol.command_id = commandId;
+  last_protocol.payload_size = payloadSize;
+  last_protocol.bytes_read = payloadSize;
+  memcpy(last_protocol.payload, payload, payloadSize);
+  last_protocol_valid = true;
+  return true;
+}
+
+uint32_t term_injectBusWords(const uint16_t *words, uint16_t count) {
+  // Interrupts off, so the ROM3 interrupt cannot interleave its own words.
+  uint32_t ints = save_and_disable_interrupts();
+  for (uint16_t i = 0; i < count; i++) {
+    tprotocol_parse(words[i], handle_protocol_command,
+                    handle_protocol_checksum_error);
+  }
+  restore_interrupts(ints);
+  return tprotocol_oversized_frames;
+}
+#endif
 
 static void term_reset_input(void) {
   memset(input_buffer, 0, sizeof(input_buffer));
@@ -207,13 +243,28 @@ static void term_print_menu(void) {
   } else if (installed_app_count == 0) {
     term_print_string("No downloaded apps found\n");
   } else {
-    for (uint16_t i = 0; i < installed_app_count; i++) {
+    // One page at a time, numbered across pages, so an app keeps its number
+    // whichever page shows it.
+    uint16_t pages = term_page_count();
+    if (term_page >= pages) {
+      term_page = (uint16_t)(pages - 1);
+    }
+    uint16_t first = (uint16_t)(term_page * TERM_APPS_PER_PAGE);
+    uint16_t last = (uint16_t)(first + TERM_APPS_PER_PAGE);
+    if (last > installed_app_count) {
+      last = installed_app_count;
+    }
+    for (uint16_t i = first; i < last; i++) {
       if (installed_apps[i].version[0] != '\0') {
         term_printf("%u. %s (%s)\n", (unsigned)(i + 1), installed_apps[i].name,
                     installed_apps[i].version);
       } else {
         term_printf("%u. %s\n", (unsigned)(i + 1), installed_apps[i].name);
       }
+    }
+    if (pages > 1) {
+      term_printf("Page %u/%u. N: next, P: previous\n",
+                  (unsigned)(term_page + 1), (unsigned)pages);
     }
   }
 
@@ -224,6 +275,7 @@ static void term_enter_menu(void) {
   term_active = true;
   term_reset_input();
   term_refresh_apps_cache();
+  term_page = 0;
   display_term_start(TERM_SCREEN_SIZE_X, TERM_SCREEN_SIZE_Y);
   term_print_menu();
   SEND_COMMAND_TO_DISPLAY(DISPLAY_COMMAND_TERM);
@@ -268,7 +320,8 @@ static void term_handle_selection(void) {
     return;
   }
 
-  if ((uint16_t)selected_index > installed_app_count) {
+  // Compare the whole number: cast to 16 bits, 65536 would pass as 0.
+  if (selected_index > installed_app_count) {
     term_show_status("Invalid app number");
     return;
   }
@@ -319,6 +372,22 @@ static void term_input_char(char c) {
     return;
   }
 
+  // N and P turn the page while nothing has been typed.
+  if (input_length == 0 && (c == 'n' || c == 'N' || c == 'p' || c == 'P')) {
+    uint16_t pages = term_page_count();
+    bool next = (c == 'n' || c == 'N');
+    if (next && term_page + 1 < pages) {
+      term_page++;
+    } else if (!next && term_page > 0) {
+      term_page--;
+    } else {
+      return;
+    }
+    term_print_menu();
+    display_term_refresh();
+    return;
+  }
+
   if (!isdigit((unsigned char)c)) {
     return;
   }
@@ -331,8 +400,9 @@ static void term_input_char(char c) {
   }
 }
 
-void __not_in_flash_func(term_loop)(void) {
-  if (last_protocol_valid) {
+bool __not_in_flash_func(term_loop)(void) {
+  bool handled = last_protocol_valid;
+  if (handled) {
     uint32_t random_token = TPROTO_GET_RANDOM_TOKEN(last_protocol.payload);
     uint16_t *payloadPtr = ((uint16_t *)(last_protocol).payload);
 
@@ -396,6 +466,11 @@ void __not_in_flash_func(term_loop)(void) {
         break;
     }
 
+    // Clear the flag before the token goes out: the token tells the Atari to
+    // send its next command, which can arrive before this function returns.
+    // Cleared afterwards, that command would be dropped and the Atari would
+    // wait for a token that never comes.
+    last_protocol_valid = false;
     if (memory_random_token_address != 0) {
       TPROTO_SET_RANDOM_TOKEN(memory_random_token_address, random_token);
 
@@ -404,5 +479,5 @@ void __not_in_flash_func(term_loop)(void) {
                               new_random_seed_token);
     }
   }
-  last_protocol_valid = false;
+  return handled;
 }

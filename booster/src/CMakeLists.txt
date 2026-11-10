@@ -159,6 +159,12 @@ add_subdirectory($ENV{FATFS_SDK_PATH}/src build)
 add_executable(${PROJECT_NAME} 
         main.c
 )
+
+# A function that can end without returning its value is an error, not a
+# warning: a CGI handler that fell off its end handed lwIP whatever was in r0
+# as the page to send.
+target_compile_options(${PROJECT_NAME} PRIVATE -Werror=return-type)
+
 add_dependencies(${PROJECT_NAME} generate_booster_fsdata)
 
 pico_generate_pio_header(${PROJECT_NAME} ${CMAKE_CURRENT_LIST_DIR}/romemul.pio)
@@ -166,6 +172,7 @@ pico_generate_pio_header(${PROJECT_NAME} ${CMAKE_CURRENT_LIST_DIR}/romemul.pio)
 target_sources(${PROJECT_NAME} PRIVATE
         appmngr.c
         blink.c
+        cgiparam.c
         devapi.c
         display.c
         display_fabric.c
@@ -174,18 +181,30 @@ target_sources(${PROJECT_NAME} PRIVATE
         fabric.c
         fabric_httpd.c
         hw_config.c
+        httphdr.c
         gconfig.c
+        jsonfield.c
+        lookupbackup.c
+        lookuptable.c
         lwipopts.h
         mngr.c
         mngr_httpd.c
         network.c
+        network_parse.c
         reset.c
         romemul.c
         sdcard.c
         select.c
         term.c
+        textescape.c
+        uf2copy.c
+        urlparse.c
+        utc_time.c
+        uuid.c
+        vercmp.c
         version.c
         wificonf.c
+        wificonf_parse.c
         cjson/cJSON.c
         httpc/httpc.c
         md5/md5.c
@@ -305,13 +324,21 @@ pico_enable_stdio_usb(${PROJECT_NAME} 0)
 # Workaround to disable USB output in release builds
 if(${_DEBUG} STREQUAL "0")
     pico_enable_stdio_uart(${PROJECT_NAME} 0)
+    # Remove unused code and data. The ELF keeps its symbol table: symbols
+    # never reach the .uf2, which is byte-identical either way, and
+    # tools/dev/swd.py reads the device by symbol name.
     target_link_options(${PROJECT_NAME} PRIVATE
     "-Wl,--gc-sections"
-    "-Wl,--strip-all"
     )
 
 else()
     pico_enable_stdio_uart(${PROJECT_NAME} 1)
+    # 921,600 baud, not the SDK's 115,200: DPRINTF blocks on the UART, and on a
+    # timing-sensitive cartridge bus a chatty console at 115,200 delays the
+    # firmware enough to change behavior. The UART clock error at this rate is
+    # 0.02 %. Set the serial terminal (tools/dev/console.py) to 921600.
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
+        PICO_DEFAULT_UART_BAUD_RATE=921600)
 endif()
 
 # Pass these values to the C compiler
@@ -322,6 +349,25 @@ add_definitions(-DLATEST_RELEASE_URL="${LATEST_RELEASE_URL}")
 
 # Pass the _DEBUG flag to the C compiler
 add_definitions(-D_DEBUG=${_DEBUG})
+
+# build_id.h and build_id.c (RELEASE_BUILD_ID and the release_build_id symbol,
+# the git commit) are regenerated on every build; see build_id.cmake. They are
+# rewritten only when the ID changes, so only their users recompile. The symbol
+# is kept through --gc-sections so tools/dev/swd.py can read over SWD which
+# build the device runs.
+set(BUILD_ID_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated/build_id)
+add_custom_target(build_id
+    COMMAND ${CMAKE_COMMAND} -DSRC_DIR=${CMAKE_CURRENT_LIST_DIR}
+            -DOUT_DIR=${BUILD_ID_DIR} -DDEBUG_BUILD=${_DEBUG}
+            -DCMAKE_TYPE=${CMAKE_BUILD_TYPE}
+            -P ${CMAKE_CURRENT_LIST_DIR}/build_id.cmake
+    BYPRODUCTS ${BUILD_ID_DIR}/build_id.h ${BUILD_ID_DIR}/build_id.c
+    COMMENT "Checking the build ID")
+add_dependencies(${PROJECT_NAME} build_id)
+target_sources(${PROJECT_NAME} PRIVATE ${BUILD_ID_DIR}/build_id.c)
+set_source_files_properties(${BUILD_ID_DIR}/build_id.c PROPERTIES GENERATED TRUE)
+target_include_directories(${PROJECT_NAME} PRIVATE ${BUILD_ID_DIR})
+target_link_options(${PROJECT_NAME} PRIVATE "-Wl,--undefined=release_build_id")
 
 # Device/Computer type
 if (NOT DEFINED ENV{DISPLAY_ATARIST})

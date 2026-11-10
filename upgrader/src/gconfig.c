@@ -35,6 +35,7 @@ _Static_assert(offsetof(SettingsConfigEntry, value) ==
                "Unexpected settings value layout");
 
 static char g_apps_folder[GCONFIG_VALUE_LENGTH] = GCONFIG_DEFAULT_APPS_FOLDER;
+static unsigned int g_sd_baud_rate_kb = 0;
 
 static int field_equals(const char *field, size_t field_len,
                         const char *expected) {
@@ -126,6 +127,21 @@ int gconfig_init(const char *currentAppName) {
       continue;
     }
 
+    if (field_equals(entry->key, sizeof(entry->key), PARAM_SD_BAUD_RATE_KB)) {
+      // Stored as a decimal string; anything else leaves the default speed.
+      unsigned int kb = 0;
+      size_t j = 0;
+      while (j < sizeof(entry->value) && entry->value[j] >= '0' &&
+             entry->value[j] <= '9' && kb < 1000000U) {
+        kb = kb * 10U + (unsigned int)(entry->value[j] - '0');
+        j++;
+      }
+      g_sd_baud_rate_kb =
+          (j > 0 && (j == sizeof(entry->value) || entry->value[j] == '\0')) ? kb
+                                                                            : 0;
+      continue;
+    }
+
     if ((currentAppName != NULL) &&
         field_equals(entry->key, sizeof(entry->key), PARAM_BOOT_FEATURE)) {
       boot_feature_match =
@@ -137,3 +153,5 @@ int gconfig_init(const char *currentAppName) {
 }
 
 const char *gconfig_get_apps_folder(void) { return g_apps_folder; }
+
+unsigned int gconfig_get_sd_baud_rate_kb(void) { return g_sd_baud_rate_kb; }

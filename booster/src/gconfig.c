@@ -103,7 +103,7 @@ int gconfig_init(const char *currentAppName) {
  */
 SettingsContext *gconfig_getContext(void) { return &gSettingsCtx; }
 
-// One-shot migration of APPS_CATALOG_URL onto the md-store host (D-06).
+// One-shot migration of APPS_CATALOG_URL onto the md-store host.
 //
 // Migrate if and ONLY if the stored value is byte-for-byte one of the three
 // canonical URLs that shipped firmware wrote. Those three strings were written

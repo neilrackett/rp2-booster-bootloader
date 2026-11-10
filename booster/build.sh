@@ -89,13 +89,13 @@ else
 fi
 
 # Booster is ALWAYS compiled MinSizeRel, debug included. It has one 768K slot to
-# fit (C-01) and -Og does not fit in it: a Debug build overflows by ~72KB and
+# fit and -Og does not fit in it: a Debug build overflows by ~72KB and
 # will not link. A debug build therefore differs from a release build by
 # _DEBUG=1 -- DPRINTF over UART, no --strip-all -- and not by optimisation
 # level. MinSizeRel still carries -g, so the symbols are there to debug with;
 # it also carries -DNDEBUG, so assert() is off in debug builds too.
 # `release` maps here too: -O3 overflows the slot by ~48KB and will not link,
-# which is why the root build.sh already asks for MinSizeRel (D-04). Doing it
+# which is why the root build.sh already asks for MinSizeRel. Doing it
 # here as well means booster/build.sh is safe to run on its own.
 CMAKE_BUILD_TYPE_ARG=$BUILD_TYPE
 case "$(echo "$BUILD_TYPE" | tr '[:upper:]' '[:lower:]')" in

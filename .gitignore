@@ -65,3 +65,8 @@ docs/epics/
 
 # clangd index cache written by the editor
 .cache/
+
+# Debug Probe tools: build folders, cached ELFs and console logs
+tools/dev/builds/
+tools/dev/logs/
+__pycache__/

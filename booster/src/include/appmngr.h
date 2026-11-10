@@ -19,6 +19,7 @@
 #include "debug.h"
 #include "gconfig.h"
 #include "httpc/httpc.h"
+#include "lookuptable.h"
 #include "lwip/altcp_tls.h"
 #include "lwip/apps/httpd.h"
 #include "md5/md5.h"
@@ -29,6 +30,8 @@
 #include "pico/stdlib.h"
 #include "reset.h"
 #include "sdcard.h"
+#include "urlparse.h"
+#include "uuid.h"
 
 // Sanity caps on Content-Length, checked before we start writing a download to
 // the SD card.
@@ -86,11 +89,12 @@
 
 #define UF2_BLOCK_SIZE 512
 
-// Chunk size for the UF2 -> flash copy at app launch (storeUF2FileToFlash).
-// Only a batching buffer in front of flash_range_program, which programs
-// 256-byte pages: any multiple of FLASH_PAGE_SIZE writes byte-identical flash
-// contents. One flash sector is a natural granularity (it matches the erase
-// unit) and keeps the buffer small enough to live in bss.
+// Chunk size for the UF2 -> flash copy at app launch
+// (appmngr_copy_app_to_slot). Only a batching buffer in front of
+// flash_range_program, which programs 256-byte pages: any multiple of
+// FLASH_PAGE_SIZE writes byte-identical flash contents. One flash sector is a
+// natural granularity (it matches the erase unit) and keeps the buffer small
+// enough to live in bss.
 //
 // The buffer is STATIC, not malloc'd. History of why:
 //   - It used to be the SDK's FLASH_BLOCK_SIZE (64K) from the heap. Once
@@ -111,26 +115,9 @@
 // fragmentation sensitivity, and it leaves the heap free for TLS.
 #define APP_FLASH_COPY_CHUNK_SIZE FLASH_SECTOR_SIZE
 
-// Each lookup table entry is 38 bytes:
-//   - 36 bytes for the UUID
-//   - 2 bytes for the sector (page number)
-#define LOOKUP_ENTRY_SIZE 38
 #define APPMNGR_MAX_INSTALLED_APPS (FLASH_SECTOR_SIZE / LOOKUP_ENTRY_SIZE)
 #define APPMNGR_INSTALLED_APP_NAME_LENGTH 64
 #define APPMNGR_INSTALLED_APP_VERSION_LENGTH 16
-
-typedef struct {
-  char protocol[16];
-  char host[128];
-  // A redirect target can be far longer than the URL originally requested.
-  // GitHub release assets end at a signed storage URL whose query string alone
-  // runs past 900 characters (SAS token plus JWT), so 256 truncated it and the
-  // follow-up request went to a mangled path.
-  char uri[1536];
-  // Explicit port from a "host:port" URL, or 0 to let the scheme decide
-  // (80 for http, 443 for https).
-  uint16_t port;
-} url_components_t;
 
 typedef struct {
   bool ready;
@@ -212,6 +199,11 @@ typedef enum {
   DOWNLOAD_HTTP_ERROR,
   // Appended, not inserted: these values surface in the UI and in logs.
   DOWNLOAD_MD5UNAVAILABLE_ERROR,
+  // The server sent the file with Transfer-Encoding: chunked, whose framing
+  // would be written into the file.
+  DOWNLOAD_CHUNKED_ERROR,
+  // Another download is still in flight.
+  DOWNLOAD_BUSY_ERROR,
 } download_err_t;
 
 typedef enum {
@@ -236,11 +228,29 @@ typedef enum {
   DOWNLOAD_LAUNCHAPP_INPROGRESS,
   DOWNLOAD_LAUNCHAPP_OK,
   DOWNLOAD_LAUNCHAPP_SDCARDNOTREADY_ERROR,
-  DOWNLOAD_LAUNCHAPP_NOTUUID_ERROR
+  DOWNLOAD_LAUNCHAPP_NOTUUID_ERROR,
+  // No config sector is free for the app, or the lookup table could not be
+  // read or written.
+  DOWNLOAD_LAUNCHAPP_NOCONFIGSECTOR_ERROR,
+  // The app's file could not be opened; the slot was not touched. Returned
+  // after the launch has stopped the network.
+  DOWNLOAD_LAUNCHAPP_FILE_ERROR,
+  // The copy into the slot stopped partway; the slot boots Booster. Returned
+  // after the launch has stopped the network.
+  DOWNLOAD_LAUNCHAPP_COPY_ERROR
 } download_launch_err_t;
 
 sdcard_info_t *appmngr_get_sdcard_info();
 app_info_t *appmngr_get_app_info();
+
+/**
+ * @brief Is a download, of an app or of the firmware, still in flight?
+ *
+ * Both share one HTTP request and one temporary file: a second download, a
+ * retry or a cancel while this is true would rebuild the request or close the
+ * file under lwIP's callbacks.
+ */
+bool appmngr_download_in_flight(void);
 
 download_err_t appmngr_save_app_info(const char *json_str);
 
@@ -362,12 +372,12 @@ download_catalog_err_t appmngr_create_app_catalog();
 void appmngr_schedule_launch_app(const char *uuid);
 
 /**
- * @brief Schedule "Restore and launch" for the development app (EPIC-11).
+ * @brief Schedule "Restore and launch" for the development app.
  *
  * Like appmngr_schedule_launch_app(), but when the launch runs it first
  * deletes the deploy API upload and erases the development app's config
  * sector, then flashes the binary downloaded from the catalog, even though a
- * plain launch of the development app never flashes that binary (D-10). It
+ * plain launch of the development app never flashes that binary. It
  * gives a developer a clean slate after a bad deploy. The web page is the
  * only caller, and it only ever passes DEVAPI_DEV_APP_UUID.
  */
@@ -381,7 +391,7 @@ typedef enum {
 
 /**
  * @brief Erase an installed app's config sector, so the microfirmware starts
- * from its defaults the next time it runs (EPIC-11).
+ * from its defaults the next time it runs.
  *
  * The lookup table entry stays: the sector remains assigned to the app. Used
  * by "Restore and launch" and "Restore config only" for the development app.
