@@ -33,12 +33,13 @@ BYTES_ROW_HIGH		equ 80		; 80 bytes per row in the ST
 PRE_RESET_WAIT		equ $FFFFF
 TRANSTABLE			equ $FA1000	; Translation table for high resolution
 
-; TT medium resolution (640x480, 4 bitplanes): XBIOS Getrez returns 4. The ST
-; high image (640x400) is drawn in all 4 planes, centred vertically.
-REZ_TT_MED			equ 4
-BYTES_ROW_TTMED		equ 320		; 640 pixels x 4 bitplanes / 8
-TTMED_TOP_OFFSET	equ ((480 - (ROWS_HIGH * 2)) / 2) * BYTES_ROW_TTMED	; 40 lines above the image
-TTMED_SCREEN_SIZE	equ 480 * BYTES_ROW_TTMED	; 153600 bytes
+; XBIOS Getrez results. The screen is drawn in ST low or ST high only: any
+; other resolution on a colour monitor is switched to ST low while the screen
+; is shown, and back when the boot continues.
+REZ_ST_LOW			equ 0
+REZ_ST_HIGH			equ 2
+REZ_FALCON			equ 3		; A Falcon mode that is not ST compatible (see below)
+REZ_TT_HIGH			equ 6		; Mono monitor: it cannot show ST low
 
 ; If 1, the display will not use the framebuffer and will write directly to the
 ; display memory. This is useful to reduce the memory usage in the rp2040
@@ -103,6 +104,27 @@ get_screen_base		macro
 					move.w #2,-(sp)
 					trap #14
 					addq.l #2,sp
+					endm
+
+; XBIOS Setscreen, resolution only: both screen addresses stay as they are.
+; \1 is the resolution, \2 the Falcon mode, read only when \1 is 3.
+set_rez				macro
+					move.w \2,-(sp)			; Falcon mode
+					move.w \1,-(sp)			; Resolution
+					move.l #-1,-(sp)		; Physical screen unchanged
+					move.l #-1,-(sp)		; Logical screen unchanged
+					move.w #5,-(sp)			; XBIOS Setscreen
+					trap #14
+					lea 14(sp),sp
+					endm
+
+; XBIOS VsetMode(-1), Falcon only
+; Return the current video mode in D0
+get_falcon_mode		macro
+					move.w #-1,-(sp)
+					move.w #88,-(sp)
+					trap #14
+					addq.l #4,sp
 					endm
 
 ; Check the left or right shift key. If pressed, exit.
@@ -192,7 +214,7 @@ pre_auto:
 	lea SCREEN_SIZE(a2), a2		; Move to the end of the screen memory
 	move.l a2, a3				; Save the screen memory address in A3
 	; Copy the code out of the ROM to avoid unstable behavior
-    move.l #end_rom_code - start_rom_code, d6
+    move.l #end_rom_code - start_rom_code + 3, d6	; Copied in longs: round up
     lea start_rom_code, a1    ; a1 points to the start of the code in ROM
     lsr.w #2, d6
     subq #1, d6
@@ -210,10 +232,44 @@ start_rom_code:
 
 ; Get the resolution of the screen
 	get_rez
-	cmp.w #2, d0				; Check if the resolution is 640x400 (high resolution)
+	move.w d0, d3				; Keep it: d3 survives the TOS calls
+
+; On a Falcon, Getrez only describes the ST compatible modes: in 640x480 in 16
+; colours it says ST high. Any other Falcon mode counts as REZ_FALCON, and the
+; exact mode is kept in a4 to put it back.
+	move.l _p_cookies.w, d0
+	beq.s .rez_known			; No cookie jar: not a Falcon
+	move.l d0, a0
+.find_vdo:
+	move.l (a0)+, d0			; Cookie name, 0 at the end of the jar
+	beq.s .rez_known
+	cmp.l #'_VDO', d0
+	beq.s .found_vdo
+	addq.l #4, a0				; Skip the cookie value
+	bra.s .find_vdo
+.found_vdo:
+	cmp.w #3, (a0)				; $0003xxxx: Falcon video
+	bne.s .rez_known
+	get_falcon_mode
+	move.w d0, a4				; Remember the Falcon mode
+	btst #7, d0					; An ST compatible mode: Getrez is right
+	bne.s .rez_known
+	moveq #REZ_FALCON, d3
+.rez_known:
+	move.w d3, d0
+
+	move.w #-1, a5				; Resolution to restore in boot_gem: none yet
+	cmp.w #REZ_ST_HIGH, d0		; Check if the resolution is 640x400 (high resolution)
 	beq .print_loop_high		; If it is, print the message in high resolution
-	cmp.w #REZ_TT_MED, d0		; Check if the resolution is TT medium (640x480)
-	beq .init_ttmed				; If it is, print the high resolution image centred
+	tst.w d0					; ST low is drawn as it is
+	beq.s .print_loop_low
+	cmp.w #REZ_TT_HIGH, d0		; TT high is left alone: its mono monitor cannot show ST low
+	beq.s .print_loop_low
+
+; Any other resolution (ST medium, TT medium, TT low, a Falcon mode) is
+; switched to ST low. a4 and a5 survive the TOS calls and nothing here uses them.
+	move.w d0, a5				; Remember the resolution
+	set_rez #REZ_ST_LOW, #0
 
 .print_loop_low:
 	vsync_wait
@@ -282,69 +338,7 @@ start_rom_code:
 	check_commands
 
 	bra .print_loop_high		; Continue printing the message
-
-.init_ttmed:
-; The image covers lines 40 to 439 only: clear the whole screen once so nothing
-; TOS left above or below it stays visible
-	move.l a6, a0				; Set the screen memory address in a0
-	move.w #((TTMED_SCREEN_SIZE / 4) - 1), d0	; Set the number of longs to clear - 1
-.clear_screen_ttmed:
-	clr.l (a0)+
-	dbf d0, .clear_screen_ttmed
-
-.print_loop_ttmed:
-	vsync_wait
-
-; Same image as the high resolution, written to the 4 bitplanes of each 16 pixels
-	lea TTMED_TOP_OFFSET(a6), a1	; First line of the image in the screen
-	lea BYTES_ROW_TTMED(a1), a2	; Its copy in the next line
-	move.l #FRAMEBUFFER_ADDR, a0	; Set the cartridge ROM address in a0
-	move.l #TRANSTABLE, a3		; Set the translation table in a3
-	move.l #(ROWS_HIGH -1), d0	; Set the number of rows to copy - 1
-.copy_screen_row_ttmed:
-	move.l #(COLS_HIGH -1), d1	; Set the number of columns to copy - 1
-.copy_screen_col_ttmed:
-	move.w (a0)+ , d2			; Copy a word from the cartridge ROM
-
-	ifne DISPLAY_BYPASS_FRAMEBUFFER == 1
-	rol.w #8, d2				; swap high and low bytes
-	endif
-
-	move.w d2, d3				; Copy the word to d3
-	and.w #$FF00, d3			; Mask the high byte
-	lsr.w #7, d3				; Shift the high byte 7 bits to the right
-	move.w (a3, d3.w), d4		; Translate the high byte: left 16 pixels
-	move.w d4, d5				; Copy the 16 pixels to both words of d4
-	swap d4
-	move.w d5, d4
-	move.l d4, (a1)+			; Bitplanes 0 and 1
-	move.l d4, (a1)+			; Bitplanes 2 and 3
-	move.l d4, (a2)+			; Same in the next line
-	move.l d4, (a2)+
-
-	and.w #$00FF, d2			; Mask the low byte
-	add.w d2, d2				; Double the low byte
-	move.w (a3, d2.w), d4		; Translate the low byte: right 16 pixels
-	move.w d4, d5				; Copy the 16 pixels to both words of d4
-	swap d4
-	move.w d5, d4
-	move.l d4, (a1)+			; Bitplanes 0 and 1
-	move.l d4, (a1)+			; Bitplanes 2 and 3
-	move.l d4, (a2)+			; Same in the next line
-	move.l d4, (a2)+
-
-	dbf d1, .copy_screen_col_ttmed	; Loop until the row is copied
-
-	lea BYTES_ROW_TTMED(a1), a1	; Skip the line written through a2
-	lea BYTES_ROW_TTMED(a2), a2	; Skip the line written through a1
-
-	dbf d0, .copy_screen_row_ttmed	; Loop until all the message is copied
-
-; Check the different commands and the keyboard
-	check_commands
-
-	bra .print_loop_ttmed		; Continue printing the message
-
+	
 .reset:
     move.l #PRE_RESET_WAIT, d6
 .wait_me:
@@ -360,6 +354,11 @@ start_rom_code:
 
 boot_gem:
 	; If we get here, continue loading GEM
+	; in the resolution TOS started in, if the screen was switched to ST low
+	cmpa.w #-1, a5
+	beq.s .rez_unchanged
+	set_rez a5, a4
+.rez_unchanged:
     rts
 
 ; Shared functions included at the end of the file
