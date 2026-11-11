@@ -33,6 +33,13 @@ BYTES_ROW_HIGH		equ 80		; 80 bytes per row in the ST
 PRE_RESET_WAIT		equ $FFFFF
 TRANSTABLE			equ $FA1000	; Translation table for high resolution
 
+; TT medium resolution (640x480, 4 bitplanes): XBIOS Getrez returns 4. The ST
+; high image (640x400) is drawn in all 4 planes, centred vertically.
+REZ_TT_MED			equ 4
+BYTES_ROW_TTMED		equ 320		; 640 pixels x 4 bitplanes / 8
+TTMED_TOP_OFFSET	equ ((480 - (ROWS_HIGH * 2)) / 2) * BYTES_ROW_TTMED	; 40 lines above the image
+TTMED_SCREEN_SIZE	equ 480 * BYTES_ROW_TTMED	; 153600 bytes
+
 ; If 1, the display will not use the framebuffer and will write directly to the
 ; display memory. This is useful to reduce the memory usage in the rp2040
 ; When not using the framebuffer, the endianess swap must be done in the atari ST
@@ -205,6 +212,8 @@ start_rom_code:
 	get_rez
 	cmp.w #2, d0				; Check if the resolution is 640x400 (high resolution)
 	beq .print_loop_high		; If it is, print the message in high resolution
+	cmp.w #REZ_TT_MED, d0		; Check if the resolution is TT medium (640x480)
+	beq .init_ttmed				; If it is, print the high resolution image centred
 
 .print_loop_low:
 	vsync_wait
@@ -273,7 +282,69 @@ start_rom_code:
 	check_commands
 
 	bra .print_loop_high		; Continue printing the message
-	
+
+.init_ttmed:
+; The image covers lines 40 to 439 only: clear the whole screen once so nothing
+; TOS left above or below it stays visible
+	move.l a6, a0				; Set the screen memory address in a0
+	move.w #((TTMED_SCREEN_SIZE / 4) - 1), d0	; Set the number of longs to clear - 1
+.clear_screen_ttmed:
+	clr.l (a0)+
+	dbf d0, .clear_screen_ttmed
+
+.print_loop_ttmed:
+	vsync_wait
+
+; Same image as the high resolution, written to the 4 bitplanes of each 16 pixels
+	lea TTMED_TOP_OFFSET(a6), a1	; First line of the image in the screen
+	lea BYTES_ROW_TTMED(a1), a2	; Its copy in the next line
+	move.l #FRAMEBUFFER_ADDR, a0	; Set the cartridge ROM address in a0
+	move.l #TRANSTABLE, a3		; Set the translation table in a3
+	move.l #(ROWS_HIGH -1), d0	; Set the number of rows to copy - 1
+.copy_screen_row_ttmed:
+	move.l #(COLS_HIGH -1), d1	; Set the number of columns to copy - 1
+.copy_screen_col_ttmed:
+	move.w (a0)+ , d2			; Copy a word from the cartridge ROM
+
+	ifne DISPLAY_BYPASS_FRAMEBUFFER == 1
+	rol.w #8, d2				; swap high and low bytes
+	endif
+
+	move.w d2, d3				; Copy the word to d3
+	and.w #$FF00, d3			; Mask the high byte
+	lsr.w #7, d3				; Shift the high byte 7 bits to the right
+	move.w (a3, d3.w), d4		; Translate the high byte: left 16 pixels
+	move.w d4, d5				; Copy the 16 pixels to both words of d4
+	swap d4
+	move.w d5, d4
+	move.l d4, (a1)+			; Bitplanes 0 and 1
+	move.l d4, (a1)+			; Bitplanes 2 and 3
+	move.l d4, (a2)+			; Same in the next line
+	move.l d4, (a2)+
+
+	and.w #$00FF, d2			; Mask the low byte
+	add.w d2, d2				; Double the low byte
+	move.w (a3, d2.w), d4		; Translate the low byte: right 16 pixels
+	move.w d4, d5				; Copy the 16 pixels to both words of d4
+	swap d4
+	move.w d5, d4
+	move.l d4, (a1)+			; Bitplanes 0 and 1
+	move.l d4, (a1)+			; Bitplanes 2 and 3
+	move.l d4, (a2)+			; Same in the next line
+	move.l d4, (a2)+
+
+	dbf d1, .copy_screen_col_ttmed	; Loop until the row is copied
+
+	lea BYTES_ROW_TTMED(a1), a1	; Skip the line written through a2
+	lea BYTES_ROW_TTMED(a2), a2	; Skip the line written through a1
+
+	dbf d0, .copy_screen_row_ttmed	; Loop until all the message is copied
+
+; Check the different commands and the keyboard
+	check_commands
+
+	bra .print_loop_ttmed		; Continue printing the message
+
 .reset:
     move.l #PRE_RESET_WAIT, d6
 .wait_me:
